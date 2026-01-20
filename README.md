@@ -40,7 +40,7 @@ Creates a simple TCP listener.
 
 `cargo run -p minitel-app-example --features tcp -- 0.0.0.0:3000`
 
-### Axum WebSocket
+### Axum WebSocket
 
 Creates a web server serving a minitel websocket on `/ws`.
 
@@ -69,4 +69,5 @@ The current implementation does not take advantage of the Repeat control code, m
 Using the `esp` feature requires to have [setup an environment ready for ESP32 using the standard library](https://docs.esp-rs.org/book/introduction.html).
 
 By default, on `docs.rs` a fake documentation stub will be built for the main esp members. The actual doc can be built with `cargo +esp doc --config minitel-app-example/cargo-config-esp.toml --features ratatui,esp --open`
+
 
