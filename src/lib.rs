@@ -253,11 +253,17 @@ pub trait AsyncMinitelReadWriteBaudrate:
         self.send(ProtocolMessage::Pro2(Pro2::Prog, baudrate.code()))
             .await?;
         self.flush().await?;
+
+        // Give the Minitel time to process the Prog command and switch
+        // its internal baud rate before we change ours.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
         self.set_baudrate(baudrate)?;
 
-        let speed_code = self.read_pro2(Pro2Resp::QuerySpeedAnswer).await?;
-        let baudrate = Baudrate::try_from(speed_code).map_err(|_| ErrorKind::InvalidData)?;
-        Ok(baudrate)
+        // Send an explicit speed query at the new baud rate, since
+        // the Prog response is often lost during the baud rate transition.
+        self.send(ProtocolMessage::Pro1(Pro1::EnqSpeed)).await?;
+        self.get_speed_blocking()
     }
 }
 
