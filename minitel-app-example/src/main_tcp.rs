@@ -1,7 +1,6 @@
-use std::net::SocketAddr;
-
 use crate::app::App;
 use futures::{AsyncRead, AsyncWrite};
+use std::net::SocketAddr;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::Level;
 

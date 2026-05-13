@@ -1,11 +1,9 @@
 //! Application logic for the Minitel app example.
 
-use std::io;
-
 use minitel::{
     prelude::*,
-    ratatui::{widgets::Fill, MinitelBackend},
-    stum::videotex::{FunctionKey, StringMessage, UserInput, C0},
+    ratatui::{MinitelBackend, widgets::Fill},
+    stum::videotex::{C0, FunctionKey, StringMessage, UserInput},
 };
 use ratatui::{
     layout::Flex,
@@ -13,12 +11,12 @@ use ratatui::{
     style::Styled,
     symbols::border,
     widgets::{
+        Block, Padding, Paragraph, Tabs, Widget, Wrap,
         calendar::{CalendarEventStore, Monthly},
         canvas::{Canvas, Map, MapResolution},
-        Block, Padding, Paragraph, Tabs, Wrap,
     },
 };
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
 use time::{Date, Duration, Month};
 use tui_big_text::{BigText, PixelSize};
@@ -200,7 +198,7 @@ impl App {
         let big_text_area = vcenter(main_area, Constraint::Length(10));
         BigText::builder()
             .pixel_size(PixelSize::Sextant)
-            .style(Style::default().set_style((Color::Blue, self.selected_tab.color())))
+            .style(Style::default().patch((Color::Blue, self.selected_tab.color())))
             .lines(vec![
                 "Ratatui".slow_blink().into(),
                 "dans ton".into(),
@@ -279,21 +277,21 @@ impl App {
             " Full ",
             "Bordure pleine",
             border::FULL,
-            border_style.set_style((Color::Black, Color::Green)),
+            border_style.patch((Color::Black, Color::Green)),
         )
         .render(l11, buf);
         border_demo(
             " Quad Inside ",
             "Quadrants intérieur",
             border::QUADRANT_INSIDE,
-            border_style.set_style((Color::Black, Color::Green)),
+            border_style.patch((Color::Black, Color::Green)),
         )
         .render(l12, buf);
         border_demo(
             " Quad Outside ",
             "Quadrants extérieur",
             border::QUADRANT_OUTSIDE,
-            border_style.set_style((Color::Black, Color::Cyan)),
+            border_style.patch((Color::Black, Color::Cyan)),
         )
         .render(l13, buf);
 
@@ -301,7 +299,7 @@ impl App {
             " 8th Width ",
             "Largeur 1/8",
             border::ONE_EIGHTH_WIDE,
-            border_style.set_style((Color::Black, Color::Green)),
+            border_style.patch((Color::Black, Color::Green)),
         )
         .render(l21, buf);
 
@@ -309,7 +307,7 @@ impl App {
             " 8th Width bis ",
             "Largeur 1/8 décalée",
             minitel::ratatui::border::ONE_EIGHTH_WIDE_OFFSET,
-            border_style.set_style((Color::Black, Color::Green)),
+            border_style.patch((Color::Black, Color::Green)),
         )
         .render(l22, buf);
 
@@ -317,7 +315,7 @@ impl App {
             " beveled ",
             "Largeur 1/8 biseautée",
             minitel::ratatui::border::ONE_EIGHTH_WIDE_BEVEL,
-            border_style.set_style((Color::Black, Color::Green)),
+            border_style.patch((Color::Black, Color::Green)),
         )
         .render(l23, buf);
     }
@@ -349,7 +347,7 @@ impl App {
 fn border_demo<'a>(
     name: &'a str,
     content: &'a str,
-    border_set: border::Set,
+    border_set: border::Set<'a>,
     border_style: Style,
 ) -> Paragraph<'a> {
     let block = Block::bordered()

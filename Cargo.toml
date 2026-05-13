@@ -1,7 +1,7 @@
 [package]
 name = "minitel"
 version = "0.3.2"
-edition = "2021"
+edition = "2024"
 authors = ["Pierre Lulé <pierre@lule.fr>"]
 description = "Minitel interaction library"
 readme = "README.md"
@@ -16,17 +16,15 @@ members = ["minitel-app-example"]
 
 
 [dependencies]
-ratatui = { version = "0.29.0", optional = true, default-features = false, features = [
-] }
-axum = { version = "0.8.1", default-features = false, features = [
-    "ws",
-], optional = true }
-esp-idf-hal = { version = "0.44.1", optional = true }
-num_enum = "0.7.3"
-smallvec = "1.13.2"
-unicode-normalization = "0.1.24"
-log = "0.4.22"
-futures = { version = "0.3.31", optional = true }
+ratatui = { version = "0.30", optional = true, default-features = false, features = [] }
+axum = { version = "0.8", optional = true, default-features = false, features = ["ws"] }
+esp-idf-hal = { version = "0.46", optional = true }
+num_enum = "0.7"
+smallvec = "1.15"
+unicode-normalization = "0.1"
+log = "0.4"
+futures = { version = "0.3", optional = true }
+#thiserror = "2"
 
 [features]
 default = []
@@ -39,12 +37,11 @@ futures = ["dep:futures"]
 invalidation-group = ["ratatui/underline-color"]
 
 [dev-dependencies]
-env_logger = "0.11.6"
-log = "0.4.22"
-tungstenite = "0.26.1"
-ratatui = { version = "0.29.0", default-features = false }
-tokio = { version = "1.43.0", features = ["full"] }
-futures = "0.3.31"
+env_logger = "0.11"
+tungstenite = "0.30"
+ratatui = { version = "0.30", default-features = false }
+tokio = { version = "1.53", features = ["full"] }
+futures = "0.3"
 
 [package.metadata.docs.rs]
 no-default-features = true

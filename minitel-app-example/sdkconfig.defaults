@@ -1,5 +1,10 @@
-# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K).
+# Bumped 8000 -> 16000 -> 32000: confirmed by a clean "stack overflow in task main" FreeRTOS
+# panic (not just heap corruption) that this task's stack, growing past 16K too, is genuinely
+# too small. App::run()'s ratatui render pass (Canvas world map, BigText, Calendar, Tabs, ...)
+# runs synchronously on this task's stack every frame and is stack-hungry. 32K is a small
+# fraction of the ~285 KiB DRAM this board has available.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32000
 
 # Use this to set FreeRTOS kernel tick frequency to 1000 Hz (100 Hz by default).
 # This allows to use 1 ms granularity for thread sleeps (10 ms by default).

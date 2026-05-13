@@ -5,9 +5,10 @@ pub use esp::*;
 mod esp {
     use crate::{AsyncMinitelBaudrateControl, AsyncMinitelRead, AsyncMinitelWrite};
     use esp_idf_hal::{
+        delay,
         gpio::AnyIOPin,
-        io::asynch::{Read, Write},
-        sys::EspError,
+        sys::{ESP_ERR_TIMEOUT, EspError},
+        task::yield_now,
         uart,
         units::Hertz,
     };
@@ -28,37 +29,50 @@ mod esp {
     /// Create a new Minitel instance using the port UART 2.
     ///
     /// This is the port used in the ESP32 minitel development board from iodeo.
-    pub fn esp_minitel_uart2(
-    ) -> core::result::Result<Port<'static, uart::UartDriver<'static>>, EspError> {
+    pub fn esp_minitel_uart2()
+    -> core::result::Result<Port<'static, uart::UartDriver<'static>>, EspError> {
         let peripherals = esp_idf_hal::peripherals::Peripherals::take()?;
         let pins = peripherals.pins;
 
-        let uart: uart::AsyncUartDriver<'static, uart::UartDriver<'static>> =
-            uart::AsyncUartDriver::new(
-                peripherals.uart2,
-                pins.gpio17,
-                pins.gpio16,
-                Option::<AnyIOPin>::None,
-                Option::<AnyIOPin>::None,
-                &default_uart_config(),
-            )?;
+        let uart: uart::UartDriver<'static> = uart::UartDriver::new(
+            peripherals.uart2,
+            pins.gpio17,
+            pins.gpio16,
+            Option::<AnyIOPin>::None,
+            Option::<AnyIOPin>::None,
+            &default_uart_config(),
+        )?;
 
         Ok(Port::new(uart))
     }
 
+    /// A Minitel serial port backed directly by `esp-idf-hal`'s blocking `UartDriver`.
+    ///
+    /// Reads/writes/flushes are implemented by polling the driver with a non-blocking
+    /// timeout and yielding to the executor between attempts, rather than through
+    /// `esp-idf-hal`'s `AsyncUartDriver`. The latter spawns a background FreeRTOS task with a
+    /// fixed 2 KB stack that wakes the calling task's `Waker` directly from that stack; under
+    /// Tokio's `current_thread` runtime, waking from a different OS task takes Tokio's heavier
+    /// cross-thread wake path, which overflows that stack. Busy-polling (the same pattern
+    /// `AsyncUartDriver` itself uses for writes, since the UART ISR can't notify on TX space)
+    /// avoids the background task and its wake path entirely.
     pub struct Port<'a, T>
     where
         T: BorrowMut<uart::UartDriver<'a>>,
     {
-        pub uart: uart::AsyncUartDriver<'a, T>,
+        pub uart: T,
+        _lifetime: core::marker::PhantomData<&'a ()>,
     }
 
     impl<'a, T> Port<'a, T>
     where
         T: BorrowMut<uart::UartDriver<'a>>,
     {
-        pub fn new(uart: uart::AsyncUartDriver<'a, T>) -> Self {
-            Port { uart }
+        pub fn new(uart: T) -> Self {
+            Port {
+                uart,
+                _lifetime: core::marker::PhantomData,
+            }
         }
     }
 
@@ -67,10 +81,21 @@ mod esp {
         T: BorrowMut<uart::UartDriver<'a>>,
     {
         async fn read(&mut self, data: &mut [u8]) -> Result<()> {
-            self.uart
-                .read_exact(data)
-                .await
-                .map_err(|e| Error::new(ErrorKind::Other, e))
+            let mut filled = 0;
+            while filled < data.len() {
+                match self
+                    .uart
+                    .borrow_mut()
+                    .read(&mut data[filled..], delay::NON_BLOCK)
+                {
+                    Ok(len) if len > 0 => filled += len,
+                    Err(e) if e.code() != ESP_ERR_TIMEOUT => {
+                        return Err(Error::new(ErrorKind::Other, e));
+                    }
+                    _ => yield_now().await,
+                }
+            }
+            Ok(())
         }
     }
 
@@ -79,17 +104,27 @@ mod esp {
         T: BorrowMut<uart::UartDriver<'a>>,
     {
         async fn write(&mut self, data: &[u8]) -> Result<()> {
-            self.uart
-                .write_all(data)
-                .await
-                .map_err(|e| Error::new(ErrorKind::Other, e))
+            let mut written = 0;
+            while written < data.len() {
+                match self.uart.borrow_mut().write_nb(&data[written..]) {
+                    Ok(len) if len > 0 => written += len,
+                    Ok(_) => yield_now().await,
+                    Err(e) => return Err(Error::new(ErrorKind::Other, e)),
+                }
+            }
+            Ok(())
         }
 
         async fn flush(&mut self) -> Result<()> {
-            self.uart
-                .flush()
-                .await
-                .map_err(|e| Error::new(ErrorKind::Other, e))
+            loop {
+                match self.uart.borrow_mut().wait_tx_done(delay::NON_BLOCK) {
+                    Ok(()) => return Ok(()),
+                    Err(e) if e.code() != ESP_ERR_TIMEOUT => {
+                        return Err(Error::new(ErrorKind::Other, e));
+                    }
+                    _ => yield_now().await,
+                }
+            }
         }
     }
 
@@ -99,7 +134,7 @@ mod esp {
     {
         fn set_baudrate(&mut self, baudrate: crate::stum::protocol::Baudrate) -> Result<()> {
             self.uart
-                .driver_mut()
+                .borrow_mut()
                 .change_baudrate(baudrate.hertz())
                 .map_err(|e| Error::new(ErrorKind::Other, e))?;
             Ok(())
@@ -108,7 +143,6 @@ mod esp {
         fn read_byte_blocking(&mut self) -> Result<u8> {
             let mut byte: [u8; 1] = [0];
             self.uart
-                .driver()
                 .borrow_mut()
                 .read(&mut byte, 20)
                 .map_err(|e| Error::new(ErrorKind::Other, e))?;
@@ -132,10 +166,6 @@ mod esp {
         pub struct UartDriver<'a> {
             _phantom: core::marker::PhantomData<&'a ()>,
         }
-
-        pub struct AsyncUartDriver<'a, T> {
-            _phantom: core::marker::PhantomData<&'a T>,
-        }
     }
     #[doc(hidden)]
     pub struct EspError;
@@ -148,8 +178,8 @@ mod esp {
     /// Create a new Minitel instance using the port UART 2.
     ///
     /// This is the port used in the ESP32 minitel development board from iodeo.
-    pub fn esp_minitel_uart2(
-    ) -> core::result::Result<Port<'static, uart::UartDriver<'static>>, EspError> {
+    pub fn esp_minitel_uart2()
+    -> core::result::Result<Port<'static, uart::UartDriver<'static>>, EspError> {
         unimplemented!()
     }
 
@@ -157,15 +187,19 @@ mod esp {
     where
         T: BorrowMut<uart::UartDriver<'a>>,
     {
-        pub uart: uart::AsyncUartDriver<'a, T>,
+        pub uart: T,
+        _lifetime: core::marker::PhantomData<&'a ()>,
     }
 
     impl<'a, T> Port<'a, T>
     where
         T: BorrowMut<uart::UartDriver<'a>>,
     {
-        pub fn new(uart: uart::AsyncUartDriver<'a, T>) -> Self {
-            Port { uart }
+        pub fn new(uart: T) -> Self {
+            Port {
+                uart,
+                _lifetime: core::marker::PhantomData,
+            }
         }
     }
 

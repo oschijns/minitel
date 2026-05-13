@@ -1,15 +1,13 @@
-use std::io::Write;
-
-use backend::WindowSize;
-
-use ratatui::prelude::*;
-use ratatui::style::Styled;
-use ratatui::{backend::Backend, buffer::Cell};
-
 use crate::{
     stum::videotex::{GrayScale, Repeat, SIChar, SetPosition, C0, C1, G0, G1},
     MinitelMessage,
 };
+use backend::WindowSize;
+use ratatui::prelude::*;
+use ratatui::style::Styled;
+use ratatui::backend::ClearType;
+use ratatui::{backend::Backend, buffer::Cell};
+use std::io::Write;
 
 /// Keep track of the contextual data
 ///
@@ -67,6 +65,8 @@ impl<S: Write> MinitelBackend<S> {
 }
 
 impl<S: Write> Backend for MinitelBackend<S> {
+    type Error = std::io::Error;
+
     #[inline(always)]
     fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
     where
@@ -258,6 +258,16 @@ impl<S: Write> Backend for MinitelBackend<S> {
     fn clear(&mut self) -> std::io::Result<()> {
         self.send(C0::FF)?;
         Ok(())
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+        match clear_type {
+            ClearType::All => self.clear(),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "MinitelBackend only supports clearing the whole screen",
+            )),
+        }
     }
 
     fn size(&self) -> std::io::Result<ratatui::prelude::Size> {

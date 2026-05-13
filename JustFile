@@ -1,0 +1,18 @@
+
+# ESP export script expect a Posix compliant shell
+set shell := ["bash", "-uc"]
+
+
+# Run the TCP Socket example
+example-tcp:
+    cargo run -p minitel-app-example --features tcp -- 0.0.0.0:3000
+
+
+# Run the Axum WebSocket example
+example-axum:
+    cargo run -p minitel-app-example --features axum -- 0.0.0.0:3000
+
+
+# Run the ESP32 example
+example-esp32:
+    source ~/export-esp.sh && cargo +esp --config minitel-app-example/cargo-config-esp.toml run -p minitel-app-example --features=esp -- --monitor

@@ -1,11 +1,10 @@
+use crate::app::App;
 use log::{error, info};
 use minitel::{
     prelude::*,
     stum::protocol::{Baudrate, RoutingRx, RoutingTx},
 };
 use std::thread::sleep;
-
-use crate::app::App;
 
 pub fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -15,7 +14,10 @@ pub fn main() {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    esp_idf_svc::io::vfs::initialize_eventfd(1).expect("Failed to initialize eventfd");
+    // Kept alive for the whole program: dropping it would unregister the eventfd
+    // pseudo-filesystem that Tokio's reactor relies on.
+    let _eventfd =
+        esp_idf_svc::io::vfs::MountedEventfs::mount(1).expect("Failed to initialize eventfd");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -38,7 +40,8 @@ async fn async_main() -> std::io::Result<()> {
     // Initialize the minitel
     let mut minitel = minitel::esp::esp_minitel_uart2().unwrap();
     minitel.search_speed().await.unwrap();
-    minitel.set_speed(Baudrate::B9600).await.unwrap();
+    // Minitel version 1 only support a max baudrate of 1200
+    minitel.set_speed(Baudrate::B1200).await.unwrap();
     minitel
         .set_routing(false, RoutingRx::Modem, RoutingTx::Keyboard)
         .await
