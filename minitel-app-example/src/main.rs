@@ -1,17 +1,21 @@
 mod app;
 
 #[cfg(feature = "esp")]
-#[path = "main_esp.rs"]
-mod main;
+mod main_esp;
 
 #[cfg(feature = "axum")]
-#[path = "main_axum.rs"]
-mod main;
+mod main_axum;
 
 #[cfg(feature = "tcp")]
-#[path = "main_tcp.rs"]
-mod main;
+mod main_tcp;
 
 fn main() {
-    crate::main::main();
+    #[cfg(feature = "esp")]
+    crate::main_esp::main();
+
+    #[cfg(feature = "axum")]
+    crate::main_axum::main();
+
+    #[cfg(feature = "tcp")]
+    crate::main_tcp::main();
 }

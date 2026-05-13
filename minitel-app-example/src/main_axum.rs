@@ -2,8 +2,9 @@
 //!
 //! It serves a websocket on /ws
 
+use crate::app::App;
 use axum::{
-    extract::ws::WebSocketUpgrade,
+    extract::{connect_info::ConnectInfo, ws::WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{any, post},
@@ -12,20 +13,13 @@ use axum::{
 use base64::Engine;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
-
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use tower_http::{
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
-
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-//allows to extract the IP of connecting user
-use axum::extract::connect_info::ConnectInfo;
-
-use crate::app::App;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
