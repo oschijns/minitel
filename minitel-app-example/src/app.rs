@@ -21,27 +21,120 @@ use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
 use time::{Date, Duration, Month};
 use tui_big_text::{BigText, PixelSize};
 
+/// Performs the actual Wi-Fi connection.
+///
+/// Implemented per-backend: the ESP32 build drives real Wi-Fi hardware through
+/// `esp-idf-svc`, while the other backends (tcp/axum) have no radio to control and fall back
+/// to [`NoWifiConnector`].
+#[allow(async_fn_in_trait)]
+pub trait WifiConnector {
+    /// Attempt to join the given network, returning the assigned IP address on success.
+    async fn connect(&mut self, ssid: &str, password: &str) -> Result<String, String>;
+}
+
+/// Stub connector used on backends that don't drive real Wi-Fi hardware.
+#[derive(Debug, Default)]
+pub struct NoWifiConnector;
+
+impl WifiConnector for NoWifiConnector {
+    async fn connect(&mut self, _ssid: &str, _password: &str) -> Result<String, String> {
+        Err("Wifi indisponible sur ce serveur".to_string())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum WifiField {
+    #[default]
+    Ssid,
+    Password,
+}
+
+#[derive(Debug, Default)]
+enum WifiStatus {
+    #[default]
+    Idle,
+    Connecting,
+    Connected(String),
+    Failed(String),
+}
+
+/// State of the Wi-Fi connection form.
+#[derive(Debug, Default)]
+struct WifiForm {
+    ssid: String,
+    password: String,
+    focus: WifiField,
+    status: WifiStatus,
+    /// Set when the form was just submitted: the actual (potentially slow) connection attempt
+    /// is deferred to the next loop iteration, so the "Connexion en cours..." status has a
+    /// chance to be drawn and flushed to the minitel first.
+    connect_pending: bool,
+}
+
+impl WifiForm {
+    fn field_mut(&mut self) -> &mut String {
+        match self.focus {
+            WifiField::Ssid => &mut self.ssid,
+            WifiField::Password => &mut self.password,
+        }
+    }
+
+    fn push_char(&mut self, c: char) {
+        // SSID/password are capped to the sizes esp-idf-svc's ClientConfiguration accepts
+        // (32 / 64 bytes); reject control characters, which aren't valid in either.
+        if c.is_control() {
+            return;
+        }
+        let max_len = match self.focus {
+            WifiField::Ssid => 32,
+            WifiField::Password => 64,
+        };
+        let field = self.field_mut();
+        if field.len() + c.len_utf8() <= max_len {
+            field.push(c);
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.field_mut().pop();
+    }
+
+    fn reset(&mut self) {
+        *self = WifiForm::default();
+    }
+}
+
 /// Application state
 #[derive(Debug)]
-pub struct App {
+pub struct App<W: WifiConnector = NoWifiConnector> {
     selected_tab: SelectedTab,
     date: Date,
     demo_disjoint: bool,
     exit: bool,
+    wifi: WifiForm,
+    wifi_connector: W,
 }
 
-impl Default for App {
+impl<W: WifiConnector + Default> Default for App<W> {
     fn default() -> Self {
+        Self::with_wifi_connector(W::default())
+    }
+}
+
+impl<W: WifiConnector> App<W> {
+    /// Build an app with an explicit Wi-Fi connector, for connectors that aren't `Default`
+    /// (e.g. the ESP32 one, which wraps hardware handles obtained at startup).
+    pub fn with_wifi_connector(wifi_connector: W) -> Self {
         Self {
             selected_tab: SelectedTab::default(),
             date: Date::from_calendar_date(2025, Month::January, 15).unwrap(),
             demo_disjoint: false,
             exit: false,
+            wifi: WifiForm::default(),
+            wifi_connector,
         }
     }
-}
 
-impl App {
     /// runs the application's main loop until the user quits
     pub async fn run<B: AsyncMinitelRead + AsyncMinitelWrite>(
         &mut self,
@@ -80,6 +173,22 @@ impl App {
             minitel.write(buffer).await?;
             buffer.clear();
             cursor.set_position(0);
+
+            if self.wifi.connect_pending {
+                // The "Connexion en cours..." status above has now been flushed to the
+                // minitel; it's safe to perform the (potentially slow) connection attempt.
+                self.wifi.connect_pending = false;
+                let result = self
+                    .wifi_connector
+                    .connect(&self.wifi.ssid, &self.wifi.password)
+                    .await;
+                self.wifi.status = match result {
+                    Ok(ip) => WifiStatus::Connected(ip),
+                    Err(err) => WifiStatus::Failed(err),
+                };
+                continue;
+            }
+
             // Read the minitel input
             self.handle_events(minitel).await?;
         }
@@ -120,6 +229,19 @@ impl App {
                             self.demo_disjoint = !self.demo_disjoint;
                         }
                     }
+                    SelectedTab::Wifi => match b {
+                        UserInput::Char(c) => self.wifi.push_char(c),
+                        UserInput::FunctionKey(FunctionKey::Correction) => self.wifi.backspace(),
+                        UserInput::FunctionKey(FunctionKey::Annulation) => self.wifi.reset(),
+                        UserInput::FunctionKey(FunctionKey::Envoi) => match self.wifi.focus {
+                            WifiField::Ssid => self.wifi.focus = WifiField::Password,
+                            WifiField::Password => {
+                                self.wifi.status = WifiStatus::Connecting;
+                                self.wifi.connect_pending = true;
+                            }
+                        },
+                        _ => {}
+                    },
                     _ => {}
                 },
             }
@@ -139,9 +261,11 @@ enum SelectedTab {
     World,
     #[strum(to_string = "Bordures")]
     Borders,
+    #[strum(to_string = "WiFi")]
+    Wifi,
 }
 
-impl Widget for &App {
+impl<W: WifiConnector> Widget for &App<W> {
     /// Draw the application to the ratatui buffer
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [title_area, tabs_area, main_area, instructions_area] = Layout::vertical([
@@ -172,13 +296,16 @@ impl Widget for &App {
             SelectedTab::Borders => {
                 self.draw_border_demo(buf, main_area);
             }
+            SelectedTab::Wifi => {
+                self.draw_wifi_form(buf, main_area);
+            }
         }
 
         self.draw_instructions(buf, instructions_area);
     }
 }
 
-impl App {
+impl<W: WifiConnector> App<W> {
     fn draw_tabs(&self, buf: &mut Buffer, tabs_area: Rect, main_area: Rect) {
         let titles = SelectedTab::iter().map(SelectedTab::title);
         let selected_tab_index = self.selected_tab as usize;
@@ -320,6 +447,82 @@ impl App {
         .render(l23, buf);
     }
 
+    fn draw_wifi_form(&self, buf: &mut Buffer, main_area: Rect) {
+        let form_area = center(main_area, Constraint::Length(34), Constraint::Length(7));
+        let block = Block::bordered()
+            .title(" Connexion Wi-Fi ")
+            .title_alignment(Alignment::Center)
+            .style((Color::White, Color::Blue));
+        let inner = block.inner(form_area);
+        block.render(form_area, buf);
+
+        let [ssid_area, password_area, _spacer, status_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        self.draw_wifi_field(
+            buf,
+            ssid_area,
+            "SSID",
+            &self.wifi.ssid,
+            WifiField::Ssid,
+            false,
+        );
+        self.draw_wifi_field(
+            buf,
+            password_area,
+            "Mot de passe",
+            &self.wifi.password,
+            WifiField::Password,
+            true,
+        );
+
+        let (status_text, status_style) = match &self.wifi.status {
+            WifiStatus::Idle => (String::new(), Style::default()),
+            WifiStatus::Connecting => (
+                "Connexion en cours...".to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+            WifiStatus::Connected(ip) => (
+                format!("Connecte : {ip}"),
+                Style::default().fg(Color::Green),
+            ),
+            WifiStatus::Failed(err) => (format!("Echec : {err}"), Style::default().fg(Color::Red)),
+        };
+        Paragraph::new(status_text)
+            .style(status_style)
+            .wrap(Wrap { trim: false })
+            .render(status_area, buf);
+    }
+
+    fn draw_wifi_field(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        label: &str,
+        value: &str,
+        field: WifiField,
+        mask: bool,
+    ) {
+        let displayed = if mask {
+            "*".repeat(value.chars().count())
+        } else {
+            value.to_string()
+        };
+        let style = if self.wifi.focus == field {
+            Style::default().fg(Color::Black).bg(Color::White)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Paragraph::new(format!("{label}: {displayed}"))
+            .style(style)
+            .render(area, buf);
+    }
+
     fn draw_instructions(&self, buf: &mut Buffer, instructions_area: Rect) {
         let instructions_1 = Line::from(vec![
             " Onglets:".into(),
@@ -335,6 +538,12 @@ impl App {
             SelectedTab::Borders | SelectedTab::World => {
                 Line::from(vec![" Joint/Disjoint:".into(), " Envoi".reversed()])
             }
+            SelectedTab::Wifi => Line::from(vec![
+                " Suivant/OK:".into(),
+                " Envoi".reversed(),
+                " Effacer:".into(),
+                " Correction".reversed(),
+            ]),
             _ => Line::default(),
         };
 
@@ -412,6 +621,7 @@ impl SelectedTab {
             SelectedTab::Bienvenue => Color::Cyan,
             SelectedTab::World => Color::Magenta,
             SelectedTab::Borders => Color::Green,
+            SelectedTab::Wifi => Color::Red,
         }
     }
 }

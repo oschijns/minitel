@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::wifi_esp::EspWifiConnector;
 use log::{error, info};
 use minitel::{
     prelude::*,
@@ -37,8 +38,8 @@ pub fn main() {
 }
 
 async fn async_main() -> std::io::Result<()> {
-    // Initialize the minitel
-    let mut minitel = minitel::esp::esp_minitel_uart2().unwrap();
+    // Initialize the minitel. The modem peripheral is left over for the Wi-Fi connector below.
+    let (mut minitel, modem) = minitel::esp::esp_minitel_uart2().unwrap();
     minitel.search_speed().await.unwrap();
     // Minitel version 1 only support a max baudrate of 1200
     minitel.set_speed(Baudrate::B1200).await.unwrap();
@@ -47,8 +48,15 @@ async fn async_main() -> std::io::Result<()> {
         .await
         .unwrap();
 
+    let sys_loop = esp_idf_svc::eventloop::EspSystemEventLoop::take().unwrap();
+    let nvs = esp_idf_svc::nvs::EspDefaultNvsPartition::take().unwrap();
+    let wifi_connector = EspWifiConnector::new(modem, sys_loop, nvs).unwrap();
+
     // Run the app
-    App::default().run(&mut minitel).await.unwrap();
+    App::with_wifi_connector(wifi_connector)
+        .run(&mut minitel)
+        .await
+        .unwrap();
 
     minitel
         .set_routing(true, RoutingRx::Modem, RoutingTx::Keyboard)

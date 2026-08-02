@@ -3,6 +3,9 @@ mod app;
 #[cfg(feature = "esp")]
 mod main_esp;
 
+#[cfg(feature = "esp")]
+mod wifi_esp;
+
 #[cfg(feature = "axum")]
 mod main_axum;
 

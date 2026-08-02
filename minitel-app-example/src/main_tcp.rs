@@ -1,4 +1,4 @@
-use crate::app::App;
+use crate::app::{App, NoWifiConnector};
 use futures::{AsyncRead, AsyncWrite};
 use std::net::SocketAddr;
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -24,7 +24,7 @@ pub async fn main() {
 
 pub async fn serve<T: AsyncWrite + AsyncRead + Unpin>(mut stream: T, socket: SocketAddr) {
     log::info!("Serving {}", socket);
-    let r = App::default().run(&mut stream).await;
+    let r = App::<NoWifiConnector>::default().run(&mut stream).await;
     match r {
         Ok(_) => log::info!("Connection with {} closed", socket),
         Err(e) => log::error!("Connection with {} closed with error: {:?}", socket, e),

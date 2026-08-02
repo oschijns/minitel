@@ -2,13 +2,13 @@
 //!
 //! It serves a websocket on /ws
 
-use crate::app::App;
+use crate::app::{App, NoWifiConnector};
 use axum::{
+    Json, Router,
     extract::{connect_info::ConnectInfo, ws::WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{any, post},
-    Json, Router,
 };
 use base64::Engine;
 use clap::Parser;
@@ -93,7 +93,7 @@ async fn ws_handler(
     info!("Client at {addr} connected.");
     ws.on_upgrade(move |socket| async move {
         let mut port = minitel::axum::Port::new(socket);
-        match App::default().run(&mut port).await {
+        match App::<NoWifiConnector>::default().run(&mut port).await {
             Ok(()) => info!("Client {addr} terminated normally"),
             Err(e) => warn!("Client {addr} terminated with error: {e}"),
         }

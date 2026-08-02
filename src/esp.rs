@@ -29,8 +29,17 @@ mod esp {
     /// Create a new Minitel instance using the port UART 2.
     ///
     /// This is the port used in the ESP32 minitel development board from iodeo.
-    pub fn esp_minitel_uart2()
-    -> core::result::Result<Port<'static, uart::UartDriver<'static>>, EspError> {
+    ///
+    /// Also returns the leftover `modem` peripheral (Wi-Fi/BT radio), which this function
+    /// doesn't use itself, so callers can set up Wi-Fi separately.
+    #[allow(clippy::type_complexity)]
+    pub fn esp_minitel_uart2() -> core::result::Result<
+        (
+            Port<'static, uart::UartDriver<'static>>,
+            esp_idf_hal::modem::Modem<'static>,
+        ),
+        EspError,
+    > {
         let peripherals = esp_idf_hal::peripherals::Peripherals::take()?;
         let pins = peripherals.pins;
 
@@ -43,7 +52,7 @@ mod esp {
             &default_uart_config(),
         )?;
 
-        Ok(Port::new(uart))
+        Ok((Port::new(uart), peripherals.modem))
     }
 
     /// A Minitel serial port backed directly by `esp-idf-hal`'s blocking `UartDriver`.
@@ -168,6 +177,12 @@ mod esp {
         }
     }
     #[doc(hidden)]
+    pub mod modem {
+        pub struct Modem<'a> {
+            _phantom: core::marker::PhantomData<&'a ()>,
+        }
+    }
+    #[doc(hidden)]
     pub struct EspError;
 
     /// Serial port configuration when the minitel starts
@@ -178,8 +193,17 @@ mod esp {
     /// Create a new Minitel instance using the port UART 2.
     ///
     /// This is the port used in the ESP32 minitel development board from iodeo.
-    pub fn esp_minitel_uart2()
-    -> core::result::Result<Port<'static, uart::UartDriver<'static>>, EspError> {
+    ///
+    /// Also returns the leftover `modem` peripheral (Wi-Fi/BT radio), which this function
+    /// doesn't use itself, so callers can set up Wi-Fi separately.
+    #[allow(clippy::type_complexity)]
+    pub fn esp_minitel_uart2() -> core::result::Result<
+        (
+            Port<'static, uart::UartDriver<'static>>,
+            modem::Modem<'static>,
+        ),
+        EspError,
+    > {
         unimplemented!()
     }
 
