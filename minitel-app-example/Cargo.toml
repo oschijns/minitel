@@ -21,7 +21,7 @@ strum = { version = "0.28", features = ["derive"] }
 time = "0.3"
 tungstenite = { version = "0.30", optional = true }
 minitel = { path = "..", features = ["ratatui"] }
-esp-idf-svc = { version = "0.52", features = [
+esp-idf-svc = { version = "0.53", features = [
     "critical-section",
     "embassy-time-driver",
     "embassy-sync",

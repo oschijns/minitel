@@ -18,9 +18,9 @@ members = ["minitel-app-example"]
 [dependencies]
 ratatui = { version = "0.30", optional = true, default-features = false, features = [] }
 axum = { version = "0.8", optional = true, default-features = false, features = ["ws"] }
-esp-idf-hal = { version = "0.46", optional = true }
+esp-idf-hal = { version = "0.47", optional = true }
 num_enum = "0.7"
-smallvec = "1.15"
+smallvec = "1.16"
 unicode-normalization = "0.1"
 log = "0.4"
 futures = { version = "0.3", optional = true }
