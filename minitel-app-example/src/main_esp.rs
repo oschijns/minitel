@@ -14,17 +14,7 @@ pub fn main() {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // Kept alive for the whole program: dropping it would unregister the eventfd
-    // pseudo-filesystem that Tokio's reactor relies on.
-    let _eventfd =
-        esp_idf_svc::io::vfs::MountedEventfs::mount(1).expect("Failed to initialize eventfd");
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to build Tokio runtime");
-
-    match rt.block_on(async { async_main().await }) {
+    match futures::executor::block_on(async_main()) {
         Ok(()) => info!("main() finished, reboot."),
         Err(err) => {
             error!("{err:?}");
@@ -40,8 +30,18 @@ async fn async_main() -> std::io::Result<()> {
     // Initialize the minitel
     let mut minitel = minitel::esp::esp_minitel_uart2().unwrap();
     minitel.search_speed().await.unwrap();
+
     // Minitel version 1 only support a max baudrate of 1200
-    minitel.set_speed(Baudrate::B1200).await.unwrap();
+    // whereas Minitel version 2 can go up to 9600
+
+    #[cfg(not(feature = "minitel2"))]
+    const BAUD: Baudrate = Baudrate::B1200;
+
+    #[cfg(feature = "minitel2")]
+    const BAUD: Baudrate = Baudrate::B9600;
+
+    minitel.set_speed(BAUD).await.unwrap();
+
     minitel
         .set_routing(false, RoutingRx::Modem, RoutingTx::Keyboard)
         .await

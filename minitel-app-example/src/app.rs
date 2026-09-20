@@ -2,24 +2,20 @@
 
 use minitel::{
     prelude::*,
-    ratatui::{MinitelBackend, widgets::Fill},
+    ratatui::MinitelBackend,
     stum::videotex::{C0, FunctionKey, StringMessage, UserInput},
 };
 use ratatui::{
-    layout::Flex,
     prelude::*,
     style::Styled,
     symbols::border,
     widgets::{
         Block, Padding, Paragraph, Tabs, Widget, Wrap,
-        calendar::{CalendarEventStore, Monthly},
-        canvas::{Canvas, Map, MapResolution},
     },
 };
 use std::io::{self, Cursor};
 use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
 use time::{Date, Duration, Month};
-use tui_big_text::{BigText, PixelSize};
 
 /// Application state
 #[derive(Debug)]
@@ -144,13 +140,21 @@ enum SelectedTab {
 impl Widget for &App {
     /// Draw the application to the ratatui buffer
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let [title_area, tabs_area, main_area, instructions_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-            Constraint::Length(2),
-        ])
-        .areas(area);
+        let title_area = Rect::new(area.x, area.y, area.width, 1);
+        let tabs_area = Rect::new(area.x, area.y + 1, area.width, 1);
+        let instructions_height = 2.min(area.height.saturating_sub(2));
+        let instructions_area = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(instructions_height),
+            area.width,
+            instructions_height,
+        );
+        let main_area = Rect::new(
+            area.x,
+            area.y + 2,
+            area.width,
+            area.height.saturating_sub(2 + instructions_height),
+        );
 
         Paragraph::new(" Minitel App Example ")
             .style((Color::Yellow, Color::Black))
@@ -195,51 +199,44 @@ impl App {
     }
 
     fn draw_welcome(&self, buf: &mut Buffer, main_area: Rect) {
-        let big_text_area = vcenter(main_area, Constraint::Length(10));
-        BigText::builder()
-            .pixel_size(PixelSize::Sextant)
-            .style(Style::default().patch((Color::Blue, self.selected_tab.color())))
-            .lines(vec![
-                "Ratatui".slow_blink().into(),
-                "dans ton".into(),
-                "Minitel !".underlined().crossed_out().into(),
-            ])
-            .centered()
-            .build()
-            .render(big_text_area, buf);
+        Paragraph::new("Ratatui\n\ndans ton Minitel !")
+            .style((Color::Blue, self.selected_tab.color()))
+            .alignment(Alignment::Center)
+            .render(main_area, buf);
     }
 
     fn draw_calendar(&self, buf: &mut Buffer, main_area: Rect) {
-        let calendar_area = center(main_area, Constraint::Length(23), Constraint::Max(9));
+        let calendar_area = Rect::new(
+            main_area.x + main_area.width.saturating_sub(23) / 2,
+            main_area.y + 1,
+            23.min(main_area.width),
+            9.min(main_area.height.saturating_sub(1)),
+        );
         let calendar_block = Block::bordered()
             .border_set(QUADRANT_OUTSIDE_TOP_FULL)
             .title(calendrier_title(self.date))
             .title_alignment(Alignment::Center)
             .style((Color::Blue, Color::White));
-        let [weekdays_area, days_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
-                .areas(calendar_block.inner(calendar_area));
+        let inner = calendar_block.inner(calendar_area);
+        let weekdays_area = Rect::new(inner.x, inner.y, inner.width, 1.min(inner.height));
+        let days_area = Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(1),
+        );
         calendar_block.render(calendar_area, buf);
-        Fill::default().fg(Color::White).render(days_area, buf); // calendar does not draw a background
+        buf.set_style(days_area, Style::default().fg(Color::Blue).bg(Color::White));
         Paragraph::new(" Di Lu Ma Me Je Ve Sa ".fg(Color::Magenta).underlined())
             .render(weekdays_area, buf);
-        Monthly::new(self.date, CalendarEventStore::default())
-            .default_style((Color::Blue, Color::White))
-            .show_surrounding(Style::default().fg(Color::Cyan))
+        Paragraph::new("  1  2  3  4  5  6  7\n  8  9 10 11 12 13 14\n 15 16 17 18 19 20 21\n 22 23 24 25 26 27 28")
+            .style((Color::Blue, Color::White))
             .render(days_area, buf);
     }
 
     fn draw_world(&self, buf: &mut Buffer, main_area: Rect) {
-        Canvas::default()
-            .paint(|ctx| {
-                ctx.draw(&Map {
-                    color: Color::Green,
-                    resolution: MapResolution::High,
-                });
-            })
-            .background_color(self.selected_tab.color())
-            .x_bounds([-180.0, 180.0])
-            .y_bounds([-90.0, 90.0])
+        Paragraph::new("          WORLD\n\n       .-''''-.\n    .-'   _    '-.\n   /    _/ \\_    \\\n  ;   _/  __  \\_  ;\n  |  /   /  \\   \\ |\n  ;  \\_  \\__/  _/ ;\n   \\    '-.__.-'  /\n    '-.________.-'")
+            .style((Color::Green, self.selected_tab.color()))
             .render(main_area, buf);
         buf.set_style(main_area, Style::default().crossed_out());
         // Force semi-graphic mode
@@ -249,25 +246,39 @@ impl App {
     }
 
     fn draw_border_demo(&self, buf: &mut Buffer, main_area: Rect) {
-        let [h1, h2] = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
-            .spacing(1)
-            .margin(1)
-            .areas(main_area);
-        let [l11, l12, l13] = Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .spacing(1)
-        .areas(h1);
-
-        let [l21, l22, l23] = Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .spacing(1)
-        .areas(h2);
+        let inner = Rect::new(
+            main_area.x + 1,
+            main_area.y + 1,
+            main_area.width.saturating_sub(2),
+            main_area.height.saturating_sub(2),
+        );
+        let left_width = inner.width.saturating_sub(1) / 2;
+        let right_width = inner.width.saturating_sub(1 + left_width);
+        let h1 = Rect::new(inner.x, inner.y, left_width, inner.height);
+        let h2 = Rect::new(
+            inner.x + left_width + 1,
+            inner.y,
+            right_width,
+            inner.height,
+        );
+        let row_height = inner.height.saturating_sub(2) / 3;
+        let last_row_height = inner.height.saturating_sub(2 + row_height * 2);
+        let l11 = Rect::new(h1.x, h1.y, h1.width, row_height);
+        let l12 = Rect::new(h1.x, h1.y + row_height + 1, h1.width, row_height);
+        let l13 = Rect::new(
+            h1.x,
+            h1.y + (row_height + 1) * 2,
+            h1.width,
+            last_row_height,
+        );
+        let l21 = Rect::new(h2.x, h2.y, h2.width, row_height);
+        let l22 = Rect::new(h2.x, h2.y + row_height + 1, h2.width, row_height);
+        let l23 = Rect::new(
+            h2.x,
+            h2.y + (row_height + 1) * 2,
+            h2.width,
+            last_row_height,
+        );
 
         let mut border_style = Style::default();
         if self.demo_disjoint {
@@ -414,19 +425,6 @@ impl SelectedTab {
             SelectedTab::Borders => Color::Green,
         }
     }
-}
-
-fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
-    let [area] = Layout::horizontal([horizontal])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
-    area
-}
-
-fn vcenter(area: Rect, vertical: Constraint) -> Rect {
-    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
-    area
 }
 
 pub const QUADRANT_OUTSIDE_TOP_FULL: border::Set = border::Set {
