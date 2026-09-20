@@ -43,9 +43,35 @@ clap = { version = "4.6", optional = true, features = ["derive"] }
 
 [features]
 default = ["esp"]
-esp = ["minitel/esp", "dep:esp-idf-svc", "dep:embassy-time-queue-utils"]
-axum = ["minitel/axum", "tokio/rt-multi-thread", "dep:axum", "dep:tower-http", "dep:tracing-subscriber", "dep:serde", "dep:serde_json", "dep:base64", "dep:clap", "dep:open"]
-tcp = ["minitel/futures", "tokio/rt-multi-thread", "dep:tokio-util", "dep:futures", "dep:tracing-subscriber"]
+
+# Enable faster baudrate on Minitel version 2
+minitel2 = []
+
+esp = [
+    "minitel/esp",
+    "dep:esp-idf-svc",
+    "dep:embassy-time-queue-utils",
+    "dep:futures"
+]
+axum = [
+    "minitel/axum",
+    "tokio/rt-multi-thread",
+    "dep:axum",
+    "dep:tower-http",
+    "dep:tracing-subscriber",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:base64",
+    "dep:clap",
+    "dep:open"
+]
+tcp = [
+    "minitel/futures",
+    "tokio/rt-multi-thread",
+    "dep:tokio-util",
+    "dep:futures",
+    "dep:tracing-subscriber"
+]
 
 [build-dependencies]
 embuild = { version = "0.33", features = ["espidf"] }

@@ -8,7 +8,6 @@ mod esp {
         delay,
         gpio::AnyIOPin,
         sys::{ESP_ERR_TIMEOUT, EspError},
-        task::yield_now,
         uart,
         units::Hertz,
     };
@@ -92,7 +91,7 @@ mod esp {
                     Err(e) if e.code() != ESP_ERR_TIMEOUT => {
                         return Err(Error::new(ErrorKind::Other, e));
                     }
-                    _ => yield_now().await,
+                    _ => delay::FreeRtos::delay_ms(1),
                 }
             }
             Ok(())
@@ -106,9 +105,15 @@ mod esp {
         async fn write(&mut self, data: &[u8]) -> Result<()> {
             let mut written = 0;
             while written < data.len() {
-                match self.uart.borrow_mut().write_nb(&data[written..]) {
-                    Ok(len) if len > 0 => written += len,
-                    Ok(_) => yield_now().await,
+                // Keep each driver call bounded. Passing a whole screen here can
+                // make the ESP-IDF UART path wait too long inside one call.
+                let end = (written + 32).min(data.len());
+                match self.uart.borrow_mut().write_nb(&data[written..end]) {
+                    Ok(len) if len > 0 => {
+                        written += len;
+                        delay::FreeRtos::delay_ms(1);
+                    }
+                    Ok(_) => delay::FreeRtos::delay_ms(1),
                     Err(e) => return Err(Error::new(ErrorKind::Other, e)),
                 }
             }
@@ -122,7 +127,7 @@ mod esp {
                     Err(e) if e.code() != ESP_ERR_TIMEOUT => {
                         return Err(Error::new(ErrorKind::Other, e));
                     }
-                    _ => yield_now().await,
+                    _ => delay::FreeRtos::delay_ms(1),
                 }
             }
         }

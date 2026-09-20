@@ -1,6 +1,5 @@
 use crate::{
-    stum::videotex::{GrayScale, Repeat, SIChar, SetPosition, C0, C1, G0, G1},
-    MinitelMessage,
+    stum::videotex::{GrayScale, SIChar, C0, C1, G0, G1},
 };
 use backend::WindowSize;
 use ratatui::prelude::*;
@@ -36,8 +35,10 @@ pub struct MinitelBackend<S: Write> {
 
     cursor_position: (u16, u16),
     last_char_kind: CharKind,
-    char_attributes: Vec<C1>,
-    zone_attributes: Vec<C1>,
+    char_attributes: [C1; 2],
+    zone_attributes: [C1; 3],
+    char_attributes_valid: bool,
+    zone_attributes_valid: bool,
     repeat: u8,
     last_cell: Option<Cell>,
 }
@@ -49,18 +50,44 @@ impl<S: Write> MinitelBackend<S> {
             cursor_position: (255, 255),
             last_char_kind: CharKind::None,
 
-            char_attributes: Vec::new(),
-            zone_attributes: Vec::new(),
+            char_attributes: [C1::Fixed; 2],
+            zone_attributes: [C1::NormalBg; 3],
+            char_attributes_valid: false,
+            zone_attributes_valid: false,
             repeat: 0,
             last_cell: None,
         }
     }
 
-    fn send<T>(&mut self, message: T) -> std::io::Result<()>
-    where
-        T: MinitelMessage,
-    {
-        self.stream.write_all(&message.message())
+    fn send_c0(&mut self, message: C0) -> std::io::Result<()> {
+        self.stream.write_all(&[message.into()])
+    }
+
+    fn send_c1(&mut self, message: C1) -> std::io::Result<()> {
+        self.stream.write_all(&[C0::ESC.into(), message.into()])
+    }
+
+    fn send_repeat(&mut self, count: u8) -> std::io::Result<()> {
+        self.stream.write_all(&[C0::Rep.into(), 0x40 + count])
+    }
+
+    fn send_position(&mut self, x: u16, y: u16) -> std::io::Result<()> {
+        self.stream
+            .write_all(&[C0::US.into(), 0x40 + y as u8, 0x41 + x as u8])
+    }
+
+    fn send_char(&mut self, char_kind: CharKind) -> std::io::Result<()> {
+        match char_kind {
+            CharKind::None => self.send_c0(C0::NUL),
+            CharKind::SemiGraphic(G1(value)) => self.stream.write_all(&[value]),
+            CharKind::Alphabet(SIChar::G0(G0(value))) => self.stream.write_all(&[value]),
+            CharKind::Alphabet(SIChar::G2(g2)) => {
+                self.stream.write_all(&[C0::SS2.into(), g2.into()])
+            }
+            CharKind::Alphabet(SIChar::G0Diacritic(G0(base), diacritic)) => self
+                .stream
+                .write_all(&[C0::SS2.into(), diacritic.into(), base]),
+        }
     }
 }
 
@@ -82,13 +109,13 @@ impl<S: Write> Backend for MinitelBackend<S> {
                 self.repeat += 1;
                 continue;
             } else if self.repeat > 0 {
-                self.send(Repeat(self.repeat))?;
+                self.send_repeat(self.repeat)?;
                 self.repeat = 0;
             }
             self.last_cell = Some(cell.to_owned());
 
             // Zone attributes: background color, invert, ...
-            let mut zone_attributes = vec![match cell.bg {
+            let zone_attributes = [match cell.bg {
                 Color::Black => C1::BgBlack,
                 Color::Red => C1::BgRed,
                 Color::Green => C1::BgGreen,
@@ -106,19 +133,19 @@ impl<S: Write> Backend for MinitelBackend<S> {
                 Color::LightCyan => C1::BgCyan,
                 Color::White => C1::BgWhite,
                 _ => C1::BgBlack,
-            }];
-            zone_attributes.push(match cell.modifier.contains(Modifier::UNDERLINED) {
-                true => C1::BeginUnderline,
-                false => C1::EndUnderline,
-            });
-            zone_attributes.push(match cell.modifier.contains(Modifier::REVERSED) {
-                true => C1::InvertBg,
-                false => C1::NormalBg,
-            });
+            },
+                match cell.modifier.contains(Modifier::UNDERLINED) {
+                    true => C1::BeginUnderline,
+                    false => C1::EndUnderline,
+                },
+                match cell.modifier.contains(Modifier::REVERSED) {
+                    true => C1::InvertBg,
+                    false => C1::NormalBg,
+                },
+            ];
 
             // Char attributes: foreground color, blink, ...
-            let mut char_attributes = Vec::new();
-            char_attributes.push(match cell.fg {
+            let char_attributes = [match cell.fg {
                 Color::Black => C1::CharBlack,
                 Color::Red => C1::CharRed,
                 Color::Green => C1::CharGreen,
@@ -136,15 +163,15 @@ impl<S: Write> Backend for MinitelBackend<S> {
                 Color::LightCyan => C1::CharCyan,
                 Color::White => C1::CharWhite,
                 _ => C1::CharWhite,
-            });
-
-            if cell.modifier.contains(Modifier::RAPID_BLINK)
-                || cell.modifier.contains(Modifier::SLOW_BLINK)
-            {
-                char_attributes.push(C1::Blink);
-            } else {
-                char_attributes.push(C1::Fixed);
-            }
+            },
+                if cell.modifier.contains(Modifier::RAPID_BLINK)
+                    || cell.modifier.contains(Modifier::SLOW_BLINK)
+                {
+                    C1::Blink
+                } else {
+                    C1::Fixed
+                },
+            ];
 
             // Chose between a char or a semi graphic
             // The crossed out modifier is taken as prefering a semi graphic char
@@ -173,72 +200,75 @@ impl<S: Write> Backend for MinitelBackend<S> {
                     != std::mem::discriminant(&char_kind)
             {
                 self.cursor_position = (x, y);
-                self.char_attributes = Vec::new();
-                self.zone_attributes = Vec::new();
+                self.char_attributes_valid = false;
+                self.zone_attributes_valid = false;
                 self.last_char_kind = char_kind;
 
                 // Move the cursor to the right position, select the char set
-                self.stream
-                    .write_all(&SetPosition(x as u8, y as u8).message())?;
+                self.send_position(x, y)?;
 
-                self.send(char_kind.escape_code())?;
+                self.send_c0(char_kind.escape_code())?;
             }
 
             match char_kind {
                 CharKind::Alphabet(SIChar::G0(G0(0x20))) => {
                     // Empty char, update the zone attributes if necessary
-                    if self.zone_attributes != zone_attributes {
+                    if !self.zone_attributes_valid || self.zone_attributes != zone_attributes {
                         for attr in &zone_attributes {
-                            self.send(*attr)?;
+                            self.send_c1(*attr)?;
                         }
                         self.zone_attributes.clone_from(&zone_attributes);
+                        self.zone_attributes_valid = true;
                     }
-                    self.send(SIChar::G0(G0(0x20)))?;
+                    self.send_char(CharKind::Alphabet(SIChar::G0(G0(0x20))))?;
                 }
                 CharKind::Alphabet(c) => {
                     // Alphabetic char, update the char attributes if necessary
-                    if self.char_attributes != char_attributes {
+                    if !self.char_attributes_valid || self.char_attributes != char_attributes {
                         for attr in &char_attributes {
-                            self.send(*attr)?;
+                            self.send_c1(*attr)?;
                         }
                         self.char_attributes.clone_from(&char_attributes);
+                        self.char_attributes_valid = true;
                     }
-                    self.send(c)?;
+                    self.send_char(CharKind::Alphabet(c))?;
                 }
                 CharKind::SemiGraphic(c) => {
                     // Semigraphic char, update both the zone and char attributes if necessary
-                    if self.zone_attributes != zone_attributes {
+                    if !self.zone_attributes_valid || self.zone_attributes != zone_attributes {
                         for attr in &zone_attributes {
-                            self.send(*attr)?;
+                            self.send_c1(*attr)?;
                         }
                         self.zone_attributes.clone_from(&zone_attributes);
+                        self.zone_attributes_valid = true;
                     }
-                    if self.char_attributes != char_attributes {
+                    if !self.char_attributes_valid || self.char_attributes != char_attributes {
                         for attr in &char_attributes {
-                            self.send(*attr)?;
+                            self.send_c1(*attr)?;
                         }
                         self.char_attributes.clone_from(&char_attributes);
+                        self.char_attributes_valid = true;
                     }
                     // Write the semi graphic char
-                    self.send(c)?;
+                    self.send_char(CharKind::SemiGraphic(c))?;
                 }
                 _ => {}
             }
         }
         if self.repeat > 0 {
-            self.send(Repeat(self.repeat))?;
+            self.send_repeat(self.repeat)?;
             self.repeat = 0;
         }
         Ok(())
     }
 
     fn hide_cursor(&mut self) -> std::io::Result<()> {
-        self.send(C0::Coff)?;
+        self.send_c0(C0::Coff)?;
         Ok(())
     }
 
     fn show_cursor(&mut self) -> std::io::Result<()> {
-        self.send(C0::Con)?;
+        self.send_c0(C0::Con)?;
         Ok(())
     }
 
@@ -251,12 +281,12 @@ impl<S: Write> Backend for MinitelBackend<S> {
         position: P,
     ) -> std::io::Result<()> {
         let position: Position = position.into();
-        self.send(SetPosition(position.x as u8, position.y as u8))?;
+        self.send_position(position.x, position.y)?;
         Ok(())
     }
 
     fn clear(&mut self) -> std::io::Result<()> {
-        self.send(C0::FF)?;
+        self.send_c0(C0::FF)?;
         Ok(())
     }
 
