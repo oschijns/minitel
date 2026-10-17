@@ -8,11 +8,14 @@ readme = "README.md"
 repository = "https://github.com/plule/minitel"
 license = "MIT OR Apache-2.0"
 categories = ["hardware-support", "api-bindings", "embedded", "web-programming"]
-keywords = ["minitel", "videotex", "teletel"]
-exclude = [".gitignore", "*.code-workspace", ".github", ".embuild", ".vscode"]
+keywords   = ["minitel", "videotex", "teletel"]
+exclude    = [".gitignore", "*.code-workspace", ".github", ".embuild", ".vscode"]
 
 [workspace]
-members = ["minitel-app-example"]
+members = [
+    "minitel-app-example",
+    "minitel-wifi",
+]
 
 
 [dependencies]
@@ -28,19 +31,19 @@ futures = { version = "0.3", optional = true }
 
 [features]
 default = []
-esp = ["dep:esp-idf-hal"]
-espdoc = []
+esp     = ["dep:esp-idf-hal"]
+espdoc  = []
 ratatui = ["dep:ratatui"]
-docsrs = ["ratatui", "axum", "espdoc", "futures"]
-axum = ["dep:axum"]
+docsrs  = ["ratatui", "axum", "espdoc", "futures"]
+axum    = ["dep:axum"]
 futures = ["dep:futures"]
 invalidation-group = ["ratatui/underline-color"]
 
 [dev-dependencies]
-env_logger = "0.11"
+env_logger  = "0.11"
 tungstenite = "0.30"
 ratatui = { version = "0.30", default-features = false }
-tokio = { version = "1.53", features = ["full"] }
+tokio   = { version = "1.53", features = ["full"] }
 futures = "0.3"
 
 [package.metadata.docs.rs]

@@ -1,0 +1,50 @@
+[package]
+name    = "minitel-wifi"
+version = "0.1.1"
+edition = "2024"
+authors = ["Olivier Schyns"]
+description = "Example application running on a minitel"
+readme      = "../README.md"
+repository  = "https://github.com/plule/minitel"
+license     = "MIT OR Apache-2.0"
+categories  = ["hardware-support", "api-bindings", "embedded", "web-programming"]
+keywords    = ["minitel", "videotex", "teletel"]
+exclude     = ["*.code-workspace", ".github", ".embuild", ".vscode"]
+
+[dependencies]
+env_logger = "0.11"
+log     = "0.4"
+time    = "0.3"
+tracing = "0.1"
+futures = "0.3"
+tui-big-text = "0.8"
+ratatui = { version = "0.30", default-features = false, features = [
+    "widget-calendar",
+] }
+strum = { version = "0.28", features = ["derive"] }
+minitel = { path = "..", features = ["esp", "ratatui"] }
+esp-idf-svc = { version = "0.53", features = [
+    "critical-section",
+    "embassy-time-driver",
+    "embassy-sync",
+]}
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-8"] }
+tokio = { version  = "1.53", features = [
+    "rt", 
+    "net", 
+    "io-util", 
+    "macros"
+] }
+#serde      = { version = "1.0", features = ["derive"] }
+#serde_json = { version = "1.0" }
+#base64     = { version = "0.23" }
+
+[features]
+default = []
+
+# Enable faster baudrate on Minitel version 2
+minitel2 = []
+
+[build-dependencies]
+embuild = { version = "0.33", features = ["espidf"] }
+cc = "=1.1.30" # Version "1.1.30" necessary until a new version of `esp-idf-sys` is released

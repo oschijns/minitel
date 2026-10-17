@@ -16,3 +16,8 @@ example-axum:
 # Run the ESP32 example
 example-esp32:
     source ~/export-esp.sh && cargo +esp --config minitel-app-example/cargo-config-esp.toml run -p minitel-app-example --features=esp -- --monitor
+
+
+# Run the minitel WiFi app
+run-wifi:
+    source ~/export-esp.sh && cargo +esp --config minitel-wifi/cargo-config-esp.toml run -p minitel-wifi -- --monitor
