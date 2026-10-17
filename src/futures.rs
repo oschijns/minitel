@@ -1,4 +1,4 @@
-use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryFutureExt};
+use futures::{TryFutureExt, io::AsyncReadExt, io::AsyncWriteExt};
 use std::io::{Error, ErrorKind, Result};
 
 use crate::{AsyncMinitelRead, AsyncMinitelWrite};

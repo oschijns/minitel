@@ -4,11 +4,11 @@
 
 use crate::app::App;
 use axum::{
+    Json, Router,
     extract::{connect_info::ConnectInfo, ws::WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{any, post},
-    Json, Router,
 };
 use base64::Engine;
 use clap::Parser;

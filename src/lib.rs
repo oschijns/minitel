@@ -43,7 +43,7 @@ use stum::{
         Baudrate, FunctionMode, Pro1, Pro2, Pro2Resp, Pro3Resp, ProtocolMessage, Rom, RoutingRx,
         RoutingTx,
     },
-    videotex::{FunctionKey, UserInput, C0, C1, G0, G2},
+    videotex::{C0, C1, FunctionKey, G0, G2, UserInput},
 };
 
 pub trait MinitelMessage {
@@ -234,15 +234,13 @@ pub trait AsyncMinitelReadWriteBaudrate:
     fn get_speed_blocking(&mut self) -> Result<Baudrate> {
         // blocking read, can't make async timeout work on esp
         for _ in 0..10 {
-            if let Ok(C0::ESC) = self.read_byte_blocking().map(C0::from) {
-                if let Ok(C1::Pro2) = self.read_byte_blocking().map(C1::from) {
-                    if let Ok(Ok(Pro2Resp::QuerySpeedAnswer)) =
-                        self.read_byte_blocking().map(Pro2Resp::try_from)
-                    {
-                        let code = self.read_byte_blocking()?;
-                        return Baudrate::try_from(code).map_err(|_| ErrorKind::InvalidData.into());
-                    }
-                }
+            if let Ok(C0::ESC) = self.read_byte_blocking().map(C0::from)
+                && let Ok(C1::Pro2) = self.read_byte_blocking().map(C1::from)
+                && let Ok(Ok(Pro2Resp::QuerySpeedAnswer)) =
+                    self.read_byte_blocking().map(Pro2Resp::try_from)
+            {
+                let code = self.read_byte_blocking()?;
+                return Baudrate::try_from(code).map_err(|_| ErrorKind::InvalidData.into());
             }
         }
         Err(ErrorKind::NotFound.into())

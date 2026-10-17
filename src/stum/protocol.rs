@@ -8,8 +8,8 @@ use std::fmt::{Display, Formatter};
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    stum::videotex::{self, C1},
     MinitelMessage,
+    stum::videotex::{self, C1},
 };
 
 /// Emission code of the Minitel modules

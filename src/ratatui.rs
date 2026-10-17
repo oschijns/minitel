@@ -1,10 +1,8 @@
-use crate::{
-    stum::videotex::{GrayScale, SIChar, C0, C1, G0, G1},
-};
+use crate::stum::videotex::{C0, C1, G0, G1, GrayScale, SIChar};
 use backend::WindowSize;
+use ratatui::backend::ClearType;
 use ratatui::prelude::*;
 use ratatui::style::Styled;
-use ratatui::backend::ClearType;
 use ratatui::{backend::Backend, buffer::Cell};
 use std::io::Write;
 
@@ -117,25 +115,26 @@ impl<S: Write> Backend for MinitelBackend<S> {
             self.last_cell = Some(cell.to_owned());
 
             // Zone attributes: background color, invert, ...
-            let zone_attributes = [match cell.bg {
-                Color::Black => C1::BgBlack,
-                Color::Red => C1::BgRed,
-                Color::Green => C1::BgGreen,
-                Color::Yellow => C1::BgYellow,
-                Color::Blue => C1::BgBlue,
-                Color::Magenta => C1::BgMagenta,
-                Color::Cyan => C1::BgCyan,
-                Color::Gray => GrayScale::Gray50.char(),
-                Color::DarkGray => GrayScale::Gray40.char(),
-                Color::LightRed => C1::BgRed,
-                Color::LightGreen => C1::BgGreen,
-                Color::LightYellow => C1::BgYellow,
-                Color::LightBlue => C1::BgBlue,
-                Color::LightMagenta => C1::BgMagenta,
-                Color::LightCyan => C1::BgCyan,
-                Color::White => C1::BgWhite,
-                _ => C1::BgBlack,
-            },
+            let zone_attributes = [
+                match cell.bg {
+                    Color::Black => C1::BgBlack,
+                    Color::Red => C1::BgRed,
+                    Color::Green => C1::BgGreen,
+                    Color::Yellow => C1::BgYellow,
+                    Color::Blue => C1::BgBlue,
+                    Color::Magenta => C1::BgMagenta,
+                    Color::Cyan => C1::BgCyan,
+                    Color::Gray => GrayScale::Gray50.char(),
+                    Color::DarkGray => GrayScale::Gray40.char(),
+                    Color::LightRed => C1::BgRed,
+                    Color::LightGreen => C1::BgGreen,
+                    Color::LightYellow => C1::BgYellow,
+                    Color::LightBlue => C1::BgBlue,
+                    Color::LightMagenta => C1::BgMagenta,
+                    Color::LightCyan => C1::BgCyan,
+                    Color::White => C1::BgWhite,
+                    _ => C1::BgBlack,
+                },
                 match cell.modifier.contains(Modifier::UNDERLINED) {
                     true => C1::BeginUnderline,
                     false => C1::EndUnderline,
@@ -147,25 +146,26 @@ impl<S: Write> Backend for MinitelBackend<S> {
             ];
 
             // Char attributes: foreground color, blink, ...
-            let char_attributes = [match cell.fg {
-                Color::Black => C1::CharBlack,
-                Color::Red => C1::CharRed,
-                Color::Green => C1::CharGreen,
-                Color::Yellow => C1::CharYellow,
-                Color::Blue => C1::CharBlue,
-                Color::Magenta => C1::CharMagenta,
-                Color::Cyan => C1::CharCyan,
-                Color::Gray => GrayScale::Gray50.char(),
-                Color::DarkGray => GrayScale::Gray40.char(),
-                Color::LightRed => C1::CharRed,
-                Color::LightGreen => C1::CharGreen,
-                Color::LightYellow => C1::CharYellow,
-                Color::LightBlue => C1::CharBlue,
-                Color::LightMagenta => C1::CharMagenta,
-                Color::LightCyan => C1::CharCyan,
-                Color::White => C1::CharWhite,
-                _ => C1::CharWhite,
-            },
+            let char_attributes = [
+                match cell.fg {
+                    Color::Black => C1::CharBlack,
+                    Color::Red => C1::CharRed,
+                    Color::Green => C1::CharGreen,
+                    Color::Yellow => C1::CharYellow,
+                    Color::Blue => C1::CharBlue,
+                    Color::Magenta => C1::CharMagenta,
+                    Color::Cyan => C1::CharCyan,
+                    Color::Gray => GrayScale::Gray50.char(),
+                    Color::DarkGray => GrayScale::Gray40.char(),
+                    Color::LightRed => C1::CharRed,
+                    Color::LightGreen => C1::CharGreen,
+                    Color::LightYellow => C1::CharYellow,
+                    Color::LightBlue => C1::CharBlue,
+                    Color::LightMagenta => C1::CharMagenta,
+                    Color::LightCyan => C1::CharCyan,
+                    Color::White => C1::CharWhite,
+                    _ => C1::CharWhite,
+                },
                 if cell.modifier.contains(Modifier::RAPID_BLINK)
                     || cell.modifier.contains(Modifier::SLOW_BLINK)
                 {

@@ -9,9 +9,7 @@ use ratatui::{
     prelude::*,
     style::Styled,
     symbols::border,
-    widgets::{
-        Block, Padding, Paragraph, Tabs, Widget, Wrap,
-    },
+    widgets::{Block, Padding, Paragraph, Tabs, Widget, Wrap},
 };
 use std::io::{self, Cursor};
 use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
@@ -255,30 +253,15 @@ impl App {
         let left_width = inner.width.saturating_sub(1) / 2;
         let right_width = inner.width.saturating_sub(1 + left_width);
         let h1 = Rect::new(inner.x, inner.y, left_width, inner.height);
-        let h2 = Rect::new(
-            inner.x + left_width + 1,
-            inner.y,
-            right_width,
-            inner.height,
-        );
+        let h2 = Rect::new(inner.x + left_width + 1, inner.y, right_width, inner.height);
         let row_height = inner.height.saturating_sub(2) / 3;
         let last_row_height = inner.height.saturating_sub(2 + row_height * 2);
         let l11 = Rect::new(h1.x, h1.y, h1.width, row_height);
         let l12 = Rect::new(h1.x, h1.y + row_height + 1, h1.width, row_height);
-        let l13 = Rect::new(
-            h1.x,
-            h1.y + (row_height + 1) * 2,
-            h1.width,
-            last_row_height,
-        );
+        let l13 = Rect::new(h1.x, h1.y + (row_height + 1) * 2, h1.width, last_row_height);
         let l21 = Rect::new(h2.x, h2.y, h2.width, row_height);
         let l22 = Rect::new(h2.x, h2.y + row_height + 1, h2.width, row_height);
-        let l23 = Rect::new(
-            h2.x,
-            h2.y + (row_height + 1) * 2,
-            h2.width,
-            last_row_height,
-        );
+        let l23 = Rect::new(h2.x, h2.y + (row_height + 1) * 2, h2.width, last_row_height);
 
         let mut border_style = Style::default();
         if self.demo_disjoint {
