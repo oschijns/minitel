@@ -1,5 +1,10 @@
-//! Application logic for the Minitel app example.
+//! Wi-Fi setup and connectivity check for the Minitel.
 
+use esp_idf_svc::{
+    ipv4::Ipv4Addr,
+    ping::{Configuration as PingConfiguration, EspPing},
+    wifi::{AccessPointInfo, AuthMethod, ClientConfiguration, Configuration, EspWifi},
+};
 use minitel::{
     prelude::*,
     ratatui::MinitelBackend,
@@ -7,46 +12,59 @@ use minitel::{
 };
 use ratatui::{
     prelude::*,
-    style::Styled,
-    symbols::border,
-    widgets::{
-        Block, Padding, Paragraph, Tabs, Widget, Wrap,
-    },
+    widgets::{Paragraph, Widget},
 };
-use std::io::{self, Cursor};
-use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
-use time::{Date, Duration, Month};
+use std::{
+    io::{self, Cursor},
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
-/// Application state
+const PING_TARGET: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
+const FIRST_PRINTABLE_ASCII: u8 = b' ';
+const LAST_PRINTABLE_ASCII: u8 = b'~';
+
 #[derive(Debug)]
 pub struct App {
-    selected_tab: SelectedTab,
-    date: Date,
-    demo_disjoint: bool,
+    networks: Vec<AccessPointInfo>,
+    selected_network: usize,
+    password: String,
+    password_visible: bool,
+    ascii_picker: bool,
+    ascii_code: u8,
+    ascii_digits: String,
+    status: String,
     exit: bool,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
-            selected_tab: SelectedTab::default(),
-            date: Date::from_calendar_date(2025, Month::January, 15).unwrap(),
-            demo_disjoint: false,
+            networks: Vec::new(),
+            selected_network: 0,
+            password: String::new(),
+            password_visible: false,
+            ascii_picker: false,
+            ascii_code: FIRST_PRINTABLE_ASCII,
+            ascii_digits: String::new(),
+            status: String::new(),
             exit: false,
         }
     }
 }
 
 impl App {
-    /// runs the application's main loop until the user quits
+    /// Runs the Wi-Fi setup screen until the user quits.
     pub async fn run<B: AsyncMinitelRead + AsyncMinitelWrite>(
         &mut self,
         minitel: &mut B,
+        wifi: &mut EspWifi<'_>,
     ) -> io::Result<()> {
-        log::info!("Running App");
+        log::info!("Running Wi-Fi setup");
         minitel.send(C0::FF).await?;
+        self.scan_networks(wifi);
 
-        let loop_result = self.event_loop(minitel).await;
+        let loop_result = self.event_loop(minitel, wifi).await;
         if let Err(err) = loop_result {
             log::error!("Error in event loop: {:?}", err);
         }
@@ -61,23 +79,20 @@ impl App {
     async fn event_loop<B: AsyncMinitelRead + AsyncMinitelReadWrite>(
         &mut self,
         minitel: &mut B,
+        wifi: &mut EspWifi<'_>,
     ) -> io::Result<()> {
-        // Prepare a write buffer for the sync->async bridge
-        let buffer: Vec<u8> = Vec::new();
-        let cursor: Cursor<Vec<u8>> = Cursor::new(buffer);
+        let cursor = Cursor::new(Vec::new());
         let backend = MinitelBackend::new(cursor);
         let mut terminal = Terminal::new(backend)?;
+
         while !self.exit {
-            // Draw the frame to the buffer
             terminal.draw(|frame| self.draw(frame))?;
-            // Flush the buffer to the minitel
             let cursor = &mut terminal.backend_mut().stream;
             let buffer = cursor.get_mut();
             minitel.write(buffer).await?;
             buffer.clear();
             cursor.set_position(0);
-            // Read the minitel input
-            self.handle_events(minitel).await?;
+            self.handle_events(minitel, wifi).await?;
         }
         Ok(())
     }
@@ -89,351 +104,370 @@ impl App {
     async fn handle_events<B: AsyncMinitelRead + AsyncMinitelReadWrite>(
         &mut self,
         minitel: &mut B,
+        wifi: &mut EspWifi<'_>,
     ) -> io::Result<()> {
-        if let Ok(b) = minitel.read_s0_stroke().await {
-            match b {
+        if let Ok(input) = minitel.read_s0_stroke().await {
+            match input {
+                UserInput::FunctionKey(FunctionKey::Sommaire) => self.exit = true,
                 UserInput::FunctionKey(FunctionKey::Suite) => {
-                    self.selected_tab = self.selected_tab.next()
+                    if self.ascii_picker {
+                        self.step_ascii_code(1);
+                    } else if !self.networks.is_empty() {
+                        self.selected_network = (self.selected_network + 1) % self.networks.len();
+                    }
                 }
                 UserInput::FunctionKey(FunctionKey::Retour) => {
-                    self.selected_tab = self.selected_tab.previous()
+                    if self.ascii_picker {
+                        self.step_ascii_code(-1);
+                    } else if !self.networks.is_empty() {
+                        self.selected_network = self
+                            .selected_network
+                            .checked_sub(1)
+                            .unwrap_or(self.networks.len() - 1);
+                    }
                 }
-                UserInput::FunctionKey(FunctionKey::Sommaire) => self.exit = true,
-                _ => match self.selected_tab {
-                    SelectedTab::Calendrier => match b {
-                        UserInput::FunctionKey(FunctionKey::Correction) => {
-                            self.date = self.date.saturating_add(Duration::days(20));
-                            self.date = self.date.replace_day(15).unwrap();
-                        }
-                        UserInput::FunctionKey(FunctionKey::Annulation) => {
-                            self.date = self.date.saturating_sub(Duration::days(20));
-                            self.date = self.date.replace_day(15).unwrap();
-                        }
-                        _ => {}
-                    },
-                    SelectedTab::Borders | SelectedTab::World => {
-                        if let UserInput::FunctionKey(FunctionKey::Envoi) = b {
-                            self.demo_disjoint = !self.demo_disjoint;
+                UserInput::FunctionKey(FunctionKey::Guide) => {
+                    self.ascii_picker = !self.ascii_picker;
+                    self.ascii_digits.clear();
+                }
+                UserInput::FunctionKey(FunctionKey::Envoi) => {
+                    if self.ascii_picker {
+                        self.insert_ascii_character();
+                    } else {
+                        self.connect_and_ping(wifi);
+                    }
+                }
+                UserInput::FunctionKey(FunctionKey::Correction) => {
+                    if self.ascii_picker && !self.ascii_digits.is_empty() {
+                        self.ascii_digits.pop();
+                    } else {
+                        self.password.pop();
+                    }
+                }
+                UserInput::FunctionKey(FunctionKey::Repetition) => {
+                    self.password_visible = !self.password_visible;
+                }
+                UserInput::FunctionKey(FunctionKey::Annulation) => {
+                    self.password.clear();
+                }
+                UserInput::FunctionKey(FunctionKey::ConnexionFin) => {
+                    self.scan_networks(wifi);
+                }
+                UserInput::Char(character) if self.ascii_picker && character.is_ascii_digit() => {
+                    if self.ascii_digits.len() < 3 {
+                        self.ascii_digits.push(character);
+                        if let Ok(code) = self.ascii_digits.parse::<u8>() {
+                            if (FIRST_PRINTABLE_ASCII..=LAST_PRINTABLE_ASCII).contains(&code) {
+                                self.ascii_code = code;
+                            }
                         }
                     }
-                    _ => {}
-                },
+                }
+                UserInput::Char(character)
+                    if !self.ascii_picker
+                        && !character.is_control()
+                        && self.password.len() + character.len_utf8() <= 63 =>
+                {
+                    self.password.push(character);
+                }
+                _ => {}
             }
         }
         Ok(())
     }
-}
 
-#[derive(Default, Clone, Copy, Debug, Display, FromRepr, EnumIter)]
-enum SelectedTab {
-    #[default]
-    #[strum(to_string = "Bienvenue")]
-    Bienvenue,
-    #[strum(to_string = "Cal")]
-    Calendrier,
-    #[strum(to_string = "Monde")]
-    World,
-    #[strum(to_string = "Bordures")]
-    Borders,
+    fn scan_networks(&mut self, wifi: &mut EspWifi<'_>) {
+        self.status = "Recherche des reseaux Wi-Fi...".to_string();
+        match wifi.scan() {
+            Ok(networks) => {
+                self.networks = networks;
+                self.selected_network = 0;
+                self.password.clear();
+                self.status = if self.networks.is_empty() {
+                    "Aucun reseau trouve. Connexion/Fin pour rescanner.".to_string()
+                } else {
+                    format!("{} reseau(x) trouve(s).", self.networks.len())
+                };
+            }
+            Err(error) => {
+                log::error!("Wi-Fi scan failed: {error}");
+                self.networks.clear();
+                self.selected_network = 0;
+                self.status = format!("Echec du scan Wi-Fi: {error}");
+            }
+        }
+    }
+
+    fn step_ascii_code(&mut self, step: i8) {
+        self.ascii_code = if step > 0 {
+            if self.ascii_code == LAST_PRINTABLE_ASCII {
+                FIRST_PRINTABLE_ASCII
+            } else {
+                self.ascii_code + 1
+            }
+        } else if self.ascii_code == FIRST_PRINTABLE_ASCII {
+            LAST_PRINTABLE_ASCII
+        } else {
+            self.ascii_code - 1
+        };
+        self.ascii_digits.clear();
+    }
+
+    fn insert_ascii_character(&mut self) {
+        let code = if self.ascii_digits.is_empty() {
+            self.ascii_code
+        } else {
+            match self.ascii_digits.parse::<u8>() {
+                Ok(code) if (FIRST_PRINTABLE_ASCII..=LAST_PRINTABLE_ASCII).contains(&code) => code,
+                _ => {
+                    self.status = format!(
+                        "Code ASCII invalide: choisir {}-{}.",
+                        FIRST_PRINTABLE_ASCII, LAST_PRINTABLE_ASCII
+                    );
+                    self.ascii_digits.clear();
+                    return;
+                }
+            }
+        };
+
+        if self.password.len() < 63 {
+            self.password.push(char::from(code));
+            self.ascii_code = code;
+        } else {
+            self.status = "Mot de passe trop long (63 octets max.).".to_string();
+        }
+        self.ascii_digits.clear();
+    }
+
+    fn connect_and_ping(&mut self, wifi: &mut EspWifi<'_>) {
+        let Some(network) = self.networks.get(self.selected_network).cloned() else {
+            self.status = "Aucun reseau selectionne. Guide pour rescanner.".to_string();
+            return;
+        };
+
+        let password = match self.password.as_str().try_into() {
+            Ok(password) => password,
+            Err(_) => {
+                self.status = "Mot de passe trop long (63 octets maximum).".to_string();
+                return;
+            }
+        };
+        let config = Configuration::Client(ClientConfiguration {
+            ssid: network.ssid.clone(),
+            bssid: Some(network.bssid),
+            auth_method: network.auth_method.unwrap_or(AuthMethod::WPA2Personal),
+            password,
+            channel: Some(network.channel),
+            ..Default::default()
+        });
+
+        self.status = format!("Connexion a {}...", network.ssid);
+        if let Err(error) = wifi
+            .set_configuration(&config)
+            .and_then(|()| wifi.connect())
+        {
+            log::error!("Wi-Fi connection could not be started: {error}");
+            self.status = format!("Impossible de lancer la connexion: {error}");
+            return;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match wifi.is_connected() {
+                Ok(true) => match wifi.sta_netif().is_up() {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(error) => {
+                        log::error!("Could not check Wi-Fi network interface: {error}");
+                        self.status = format!("Erreur reseau: {error}");
+                        return;
+                    }
+                },
+                Ok(false) => {}
+                Err(error) => {
+                    log::error!("Could not check Wi-Fi connection: {error}");
+                    self.status = format!("Erreur Wi-Fi: {error}");
+                    return;
+                }
+            }
+
+            if Instant::now() >= deadline {
+                self.status = format!("Connexion a {} expiree.", network.ssid);
+                return;
+            }
+            sleep(Duration::from_millis(200));
+        }
+
+        self.status = format!("Connecte. Ping de {PING_TARGET}...");
+        let mut ping = EspPing::new(wifi.sta_netif().get_index());
+        match ping.ping(
+            PING_TARGET,
+            &PingConfiguration {
+                count: 3,
+                interval: Duration::from_millis(500),
+                timeout: Duration::from_secs(1),
+                ..Default::default()
+            },
+        ) {
+            Ok(summary) if summary.received > 0 => {
+                self.status = format!(
+                    "Connecte. Ping OK: {}/{} reponses.",
+                    summary.received, summary.transmitted
+                );
+            }
+            Ok(summary) => {
+                self.status = format!(
+                    "Wi-Fi connecte, ping sans reponse ({}/{}).",
+                    summary.received, summary.transmitted
+                );
+            }
+            Err(error) => {
+                log::error!("Ping to {PING_TARGET} failed: {error}");
+                self.status = format!("Wi-Fi connecte, erreur ping: {error}");
+            }
+        }
+    }
 }
 
 impl Widget for &App {
-    /// Draw the application to the ratatui buffer
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title_area = Rect::new(area.x, area.y, area.width, 1);
-        let tabs_area = Rect::new(area.x, area.y + 1, area.width, 1);
-        let instructions_height = 2.min(area.height.saturating_sub(2));
-        let instructions_area = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(instructions_height),
-            area.width,
-            instructions_height,
-        );
-        let main_area = Rect::new(
-            area.x,
-            area.y + 2,
-            area.width,
-            area.height.saturating_sub(2 + instructions_height),
-        );
+        let sections = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(3),
+        ])
+        .split(area);
 
-        Paragraph::new(" Minitel App Example ")
+        Paragraph::new(" Configuration Wi-Fi ")
             .style((Color::Yellow, Color::Black))
             .alignment(Alignment::Center)
-            .render(title_area, buf);
+            .render(sections[0], buf);
+        Paragraph::new("Reseaux disponibles (Suite/Retour)")
+            .style((Color::White, Color::Blue))
+            .render(sections[1], buf);
 
-        self.draw_tabs(buf, tabs_area, main_area);
-
-        match self.selected_tab {
-            SelectedTab::Bienvenue => {
-                self.draw_welcome(buf, main_area);
-            }
-            SelectedTab::Calendrier => {
-                self.draw_calendar(buf, main_area);
-            }
-            SelectedTab::World => {
-                self.draw_world(buf, main_area);
-            }
-            SelectedTab::Borders => {
-                self.draw_border_demo(buf, main_area);
-            }
-        }
-
-        self.draw_instructions(buf, instructions_area);
-    }
-}
-
-impl App {
-    fn draw_tabs(&self, buf: &mut Buffer, tabs_area: Rect, main_area: Rect) {
-        let titles = SelectedTab::iter().map(SelectedTab::title);
-        let selected_tab_index = self.selected_tab as usize;
-        Tabs::new(titles)
-            .select(selected_tab_index)
-            .highlight_style(Style::default())
-            .padding("", "")
-            .divider(" ")
-            .render(tabs_area, buf);
-
-        Block::default()
-            .bg(self.selected_tab.color())
-            .render(main_area, buf);
-    }
-
-    fn draw_welcome(&self, buf: &mut Buffer, main_area: Rect) {
-        Paragraph::new("Ratatui\n\ndans ton Minitel !")
-            .style((Color::Blue, self.selected_tab.color()))
-            .alignment(Alignment::Center)
-            .render(main_area, buf);
-    }
-
-    fn draw_calendar(&self, buf: &mut Buffer, main_area: Rect) {
-        let calendar_area = Rect::new(
-            main_area.x + main_area.width.saturating_sub(23) / 2,
-            main_area.y + 1,
-            23.min(main_area.width),
-            9.min(main_area.height.saturating_sub(1)),
-        );
-        let calendar_block = Block::bordered()
-            .border_set(QUADRANT_OUTSIDE_TOP_FULL)
-            .title(calendrier_title(self.date))
-            .title_alignment(Alignment::Center)
-            .style((Color::Blue, Color::White));
-        let inner = calendar_block.inner(calendar_area);
-        let weekdays_area = Rect::new(inner.x, inner.y, inner.width, 1.min(inner.height));
-        let days_area = Rect::new(
-            inner.x,
-            inner.y + 1,
-            inner.width,
-            inner.height.saturating_sub(1),
-        );
-        calendar_block.render(calendar_area, buf);
-        buf.set_style(days_area, Style::default().fg(Color::Blue).bg(Color::White));
-        Paragraph::new(" Di Lu Ma Me Je Ve Sa ".fg(Color::Magenta).underlined())
-            .render(weekdays_area, buf);
-        Paragraph::new("  1  2  3  4  5  6  7\n  8  9 10 11 12 13 14\n 15 16 17 18 19 20 21\n 22 23 24 25 26 27 28")
-            .style((Color::Blue, Color::White))
-            .render(days_area, buf);
-    }
-
-    fn draw_world(&self, buf: &mut Buffer, main_area: Rect) {
-        Paragraph::new("          WORLD\n\n       .-''''-.\n    .-'   _    '-.\n   /    _/ \\_    \\\n  ;   _/  __  \\_  ;\n  |  /   /  \\   \\ |\n  ;  \\_  \\__/  _/ ;\n   \\    '-.__.-'  /\n    '-.________.-'")
-            .style((Color::Green, self.selected_tab.color()))
-            .render(main_area, buf);
-        buf.set_style(main_area, Style::default().crossed_out());
-        // Force semi-graphic mode
-        if self.demo_disjoint {
-            buf.set_style(main_area, Style::default().underlined());
-        }
-    }
-
-    fn draw_border_demo(&self, buf: &mut Buffer, main_area: Rect) {
-        let inner = Rect::new(
-            main_area.x + 1,
-            main_area.y + 1,
-            main_area.width.saturating_sub(2),
-            main_area.height.saturating_sub(2),
-        );
-        let left_width = inner.width.saturating_sub(1) / 2;
-        let right_width = inner.width.saturating_sub(1 + left_width);
-        let h1 = Rect::new(inner.x, inner.y, left_width, inner.height);
-        let h2 = Rect::new(
-            inner.x + left_width + 1,
-            inner.y,
-            right_width,
-            inner.height,
-        );
-        let row_height = inner.height.saturating_sub(2) / 3;
-        let last_row_height = inner.height.saturating_sub(2 + row_height * 2);
-        let l11 = Rect::new(h1.x, h1.y, h1.width, row_height);
-        let l12 = Rect::new(h1.x, h1.y + row_height + 1, h1.width, row_height);
-        let l13 = Rect::new(
-            h1.x,
-            h1.y + (row_height + 1) * 2,
-            h1.width,
-            last_row_height,
-        );
-        let l21 = Rect::new(h2.x, h2.y, h2.width, row_height);
-        let l22 = Rect::new(h2.x, h2.y + row_height + 1, h2.width, row_height);
-        let l23 = Rect::new(
-            h2.x,
-            h2.y + (row_height + 1) * 2,
-            h2.width,
-            last_row_height,
-        );
-
-        let mut border_style = Style::default();
-        if self.demo_disjoint {
-            border_style = border_style.underlined();
-        }
-        border_demo(
-            " Full ",
-            "Bordure pleine",
-            border::FULL,
-            border_style.patch((Color::Black, Color::Green)),
-        )
-        .render(l11, buf);
-        border_demo(
-            " Quad Inside ",
-            "Quadrants intérieur",
-            border::QUADRANT_INSIDE,
-            border_style.patch((Color::Black, Color::Green)),
-        )
-        .render(l12, buf);
-        border_demo(
-            " Quad Outside ",
-            "Quadrants extérieur",
-            border::QUADRANT_OUTSIDE,
-            border_style.patch((Color::Black, Color::Cyan)),
-        )
-        .render(l13, buf);
-
-        border_demo(
-            " 8th Width ",
-            "Largeur 1/8",
-            border::ONE_EIGHTH_WIDE,
-            border_style.patch((Color::Black, Color::Green)),
-        )
-        .render(l21, buf);
-
-        border_demo(
-            " 8th Width bis ",
-            "Largeur 1/8 décalée",
-            minitel::ratatui::border::ONE_EIGHTH_WIDE_OFFSET,
-            border_style.patch((Color::Black, Color::Green)),
-        )
-        .render(l22, buf);
-
-        border_demo(
-            " beveled ",
-            "Largeur 1/8 biseautée",
-            minitel::ratatui::border::ONE_EIGHTH_WIDE_BEVEL,
-            border_style.patch((Color::Black, Color::Green)),
-        )
-        .render(l23, buf);
-    }
-
-    fn draw_instructions(&self, buf: &mut Buffer, instructions_area: Rect) {
-        let instructions_1 = Line::from(vec![
-            " Onglets:".into(),
-            " Suite/Retour".reversed(),
-            " Quitter:".into(),
-            " Sommaire".reversed(),
-        ]);
-
-        let instructions_2 = match self.selected_tab {
-            SelectedTab::Calendrier => {
-                Line::from(vec![" Mois:".into(), " Correction/Annulation".reversed()])
-            }
-            SelectedTab::Borders | SelectedTab::World => {
-                Line::from(vec![" Joint/Disjoint:".into(), " Envoi".reversed()])
-            }
-            _ => Line::default(),
+        let list_height = sections[2].height as usize;
+        let first_visible = self
+            .selected_network
+            .saturating_sub(list_height.saturating_sub(1));
+        let network_lines = if self.networks.is_empty() {
+            vec![Line::from("Aucun reseau disponible")]
+        } else {
+            self.networks
+                .iter()
+                .enumerate()
+                .skip(first_visible)
+                .take(list_height)
+                .map(|(index, network)| {
+                    let marker = if index == self.selected_network {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    let line = Line::from(format!(
+                        "{marker} {:<24} {:>3} dBm",
+                        network.ssid, network.signal_strength
+                    ));
+                    if index == self.selected_network {
+                        line.style((Color::Black, Color::Yellow))
+                    } else {
+                        line
+                    }
+                })
+                .collect()
         };
+        Paragraph::new(network_lines).render(sections[2], buf);
 
-        Paragraph::new(vec![instructions_1, instructions_2])
+        let password_mask = "*".repeat(self.password.chars().count());
+        let password_text = if self.password_visible {
+            visible_password(&self.password)
+        } else {
+            password_mask
+        };
+        Paragraph::new(vec![Line::from("Mot de passe:"), Line::from(password_text)])
+            .style((Color::White, Color::Blue))
+            .render(sections[3], buf);
+
+        let picker_lines = if self.ascii_picker {
+            vec![
+                Line::from(format!("ASCII {} Suite/Retour +/-", self.ascii_code)),
+                Line::from(format!("Code: {} (32-126), Envoi +", self.ascii_digits)),
+            ]
+        } else {
+            vec![
+                Line::from("Guide: saisie ASCII (32-126)"),
+                Line::from("Repetition: afficher/masquer"),
+            ]
+        };
+        Paragraph::new(picker_lines)
+            .style((Color::Cyan, Color::Blue))
+            .render(sections[4], buf);
+
+        Paragraph::new(self.status.as_str())
             .style((Color::Yellow, Color::Blue))
-            .render(instructions_area, buf);
+            .wrap(ratatui::widgets::Wrap { trim: true })
+            .render(sections[5], buf);
+        let instructions = if self.ascii_picker {
+            vec![
+                Line::from("Envoi: ajouter  Suite/Retour: code"),
+                Line::from("Correction: retour  Guide: fermer"),
+                Line::from("Fin: rescanner  Sommaire: quitter"),
+            ]
+        } else {
+            vec![
+                Line::from("Envoi: connecter  Suite/Retour: reseaux"),
+                Line::from("Correction: retour  Annulation: vider"),
+                Line::from("Fin: rescanner  Sommaire: quitter"),
+            ]
+        };
+        Paragraph::new(instructions)
+            .style((Color::White, Color::Blue))
+            .render(sections[6], buf);
     }
 }
 
-fn border_demo<'a>(
-    name: &'a str,
-    content: &'a str,
-    border_set: border::Set<'a>,
-    border_style: Style,
-) -> Paragraph<'a> {
-    let block = Block::bordered()
-        .border_set(border_set)
-        .border_style(border_style)
-        .title_alignment(Alignment::Right)
-        .title(name.set_style((Color::Yellow, Color::Black)))
-        .padding(Padding::left(1));
-
-    Paragraph::new(content)
-        .style((Color::Blue, Color::Cyan))
-        .wrap(Wrap { trim: false })
-        .block(block)
+fn visible_password(password: &str) -> String {
+    password
+        .chars()
+        .map(|character| match character {
+            ' '..=']' | '_' | 'a'..='z' | '|' => character.to_string(),
+            character if character.is_ascii() => format!("\\x{:02X}", character as u8),
+            character => format!("\\u{{{:X}}}", character as u32),
+        })
+        .collect()
 }
 
-fn calendrier_title(date: Date) -> Line<'static> {
-    let month = match date.month() {
-        Month::January => "Janvier",
-        Month::February => "Février",
-        Month::March => "Mars",
-        Month::April => "Avril",
-        Month::May => "Mai",
-        Month::June => "Juin",
-        Month::July => "Juillet",
-        Month::August => "Août",
-        Month::September => "Septembre",
-        Month::October => "Octobre",
-        Month::November => "Novembre",
-        Month::December => "Décembre",
-    };
-    Line::from(vec![
-        " < ".fg(Color::Green),
-        format!("{} {}", month, date.year()).fg(Color::White),
-        " > ".fg(Color::Green),
-    ])
-    .bg(Color::Blue)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl SelectedTab {
-    /// Get the previous tab, if there is no previous tab return the current tab.
-    fn previous(self) -> Self {
-        let current_index: usize = self as usize;
-        let previous_index = current_index.saturating_sub(1);
-        Self::from_repr(previous_index).unwrap_or(self)
+    #[test]
+    fn picker_inserts_printable_ascii_at_both_ends_of_the_range() {
+        let mut app = App::default();
+        app.ascii_code = FIRST_PRINTABLE_ASCII;
+        app.insert_ascii_character();
+        app.ascii_code = LAST_PRINTABLE_ASCII;
+        app.insert_ascii_character();
+
+        assert_eq!(app.password, " ~");
     }
 
-    /// Get the next tab, if there is no next tab return the current tab.
-    fn next(self) -> Self {
-        let current_index = self as usize;
-        let next_index = current_index.saturating_add(1);
-        Self::from_repr(next_index).unwrap_or(self)
+    #[test]
+    fn picker_accepts_decimal_ascii_codes() {
+        let mut app = App::default();
+        app.ascii_digits = "126".to_string();
+        app.insert_ascii_character();
+
+        assert_eq!(app.password, "~");
     }
 
-    /// Return tab's name as a styled `Line`
-    fn title(self) -> Line<'static> {
-        format!(" {self} ").fg(Color::Black).bg(self.color()).into()
-    }
-
-    fn color(self) -> Color {
-        match self {
-            SelectedTab::Calendrier => Color::Yellow,
-            SelectedTab::Bienvenue => Color::Cyan,
-            SelectedTab::World => Color::Magenta,
-            SelectedTab::Borders => Color::Green,
-        }
+    #[test]
+    fn password_visibility_escapes_characters_not_displayable_on_minitel() {
+        assert_eq!(visible_password("abc~"), "abc\\x7E");
+        assert_eq!(visible_password("A"), "A");
     }
 }
-
-pub const QUADRANT_OUTSIDE_TOP_FULL: border::Set = border::Set {
-    top_right: "█",
-    top_left: "█",
-    bottom_left: "▙",
-    bottom_right: "▟",
-    vertical_left: "▌",
-    vertical_right: "▐",
-    horizontal_top: "█",
-    horizontal_bottom: "▄",
-};
