@@ -2,7 +2,13 @@
 
 use esp_idf_svc::{
     ipv4::Ipv4Addr,
-    ping::{Configuration as PingConfiguration, EspPing},
+    sys::{
+        self, ESP_OK, esp_ping_callbacks_t, esp_ping_config_t, esp_ping_delete_session,
+        esp_ping_get_profile, esp_ping_handle_t, esp_ping_new_session,
+        esp_ping_profile_t_ESP_PING_PROF_REPLY, esp_ping_profile_t_ESP_PING_PROF_REQUEST,
+        esp_ping_start, esp_ping_stop, ip_addr__bindgen_ty_1, ip_addr_t, ip4_addr_t,
+        lwip_ip_addr_type_IPADDR_TYPE_V4,
+    },
     wifi::{AccessPointInfo, AuthMethod, ClientConfiguration, Configuration, EspWifi},
 };
 use minitel::{
@@ -16,6 +22,7 @@ use ratatui::{
 };
 use std::{
     io::{self, Cursor},
+    sync::atomic::{AtomicBool, AtomicU16, Ordering},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -23,6 +30,8 @@ use std::{
 const PING_TARGET: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
 const FIRST_PRINTABLE_ASCII: u8 = b' ';
 const LAST_PRINTABLE_ASCII: u8 = b'~';
+// Leave room for Rust runtime frames in the ESP-IDF ping task.
+const PING_TASK_STACK_SIZE: u32 = 8192;
 
 #[derive(Debug)]
 pub struct App {
@@ -59,12 +68,13 @@ impl App {
         &mut self,
         minitel: &mut B,
         wifi: &mut EspWifi<'_>,
+        disconnect_reason: &AtomicU16,
     ) -> io::Result<()> {
         log::info!("Running Wi-Fi setup");
         minitel.send(C0::FF).await?;
         self.scan_networks(wifi);
 
-        let loop_result = self.event_loop(minitel, wifi).await;
+        let loop_result = self.event_loop(minitel, wifi, disconnect_reason).await;
         if let Err(err) = loop_result {
             log::error!("Error in event loop: {:?}", err);
         }
@@ -80,6 +90,7 @@ impl App {
         &mut self,
         minitel: &mut B,
         wifi: &mut EspWifi<'_>,
+        disconnect_reason: &AtomicU16,
     ) -> io::Result<()> {
         let cursor = Cursor::new(Vec::new());
         let backend = MinitelBackend::new(cursor);
@@ -92,7 +103,7 @@ impl App {
             minitel.write(buffer).await?;
             buffer.clear();
             cursor.set_position(0);
-            self.handle_events(minitel, wifi).await?;
+            self.handle_events(minitel, wifi, disconnect_reason).await?;
         }
         Ok(())
     }
@@ -105,6 +116,7 @@ impl App {
         &mut self,
         minitel: &mut B,
         wifi: &mut EspWifi<'_>,
+        disconnect_reason: &AtomicU16,
     ) -> io::Result<()> {
         if let Ok(input) = minitel.read_s0_stroke().await {
             match input {
@@ -134,7 +146,7 @@ impl App {
                     if self.ascii_picker {
                         self.insert_ascii_character();
                     } else {
-                        self.connect_and_ping(wifi);
+                        self.connect_and_ping(wifi, disconnect_reason);
                     }
                 }
                 UserInput::FunctionKey(FunctionKey::Correction) => {
@@ -239,7 +251,7 @@ impl App {
         self.ascii_digits.clear();
     }
 
-    fn connect_and_ping(&mut self, wifi: &mut EspWifi<'_>) {
+    fn connect_and_ping(&mut self, wifi: &mut EspWifi<'_>, disconnect_reason: &AtomicU16) {
         let Some(network) = self.networks.get(self.selected_network).cloned() else {
             self.status = "Aucun reseau selectionne. Guide pour rescanner.".to_string();
             return;
@@ -262,6 +274,7 @@ impl App {
         });
 
         self.status = format!("Connexion a {}...", network.ssid);
+        disconnect_reason.store(0, Ordering::Relaxed);
         if let Err(error) = wifi
             .set_configuration(&config)
             .and_then(|()| wifi.connect())
@@ -276,14 +289,26 @@ impl App {
             match wifi.is_connected() {
                 Ok(true) => match wifi.sta_netif().is_up() {
                     Ok(true) => break,
-                    Ok(false) => {}
+                    Ok(false) => {
+                        let reason = disconnect_reason.load(Ordering::Relaxed);
+                        if reason != 0 {
+                            self.status = wifi_disconnect_status(reason);
+                            return;
+                        }
+                    }
                     Err(error) => {
                         log::error!("Could not check Wi-Fi network interface: {error}");
                         self.status = format!("Erreur reseau: {error}");
                         return;
                     }
                 },
-                Ok(false) => {}
+                Ok(false) => {
+                    let reason = disconnect_reason.load(Ordering::Relaxed);
+                    if reason != 0 {
+                        self.status = wifi_disconnect_status(reason);
+                        return;
+                    }
+                }
                 Err(error) => {
                     log::error!("Could not check Wi-Fi connection: {error}");
                     self.status = format!("Erreur Wi-Fi: {error}");
@@ -292,40 +317,162 @@ impl App {
             }
 
             if Instant::now() >= deadline {
-                self.status = format!("Connexion a {} expiree.", network.ssid);
+                let reason = disconnect_reason.load(Ordering::Relaxed);
+                self.status = if reason != 0 {
+                    wifi_disconnect_status(reason)
+                } else {
+                    format!(
+                        "Delai depasse pour {} (aucun motif de refus recu).",
+                        network.ssid
+                    )
+                };
                 return;
             }
             sleep(Duration::from_millis(200));
         }
 
         self.status = format!("Connecte. Ping de {PING_TARGET}...");
-        let mut ping = EspPing::new(wifi.sta_netif().get_index());
-        match ping.ping(
-            PING_TARGET,
-            &PingConfiguration {
-                count: 3,
-                interval: Duration::from_millis(500),
-                timeout: Duration::from_secs(1),
-                ..Default::default()
-            },
-        ) {
-            Ok(summary) if summary.received > 0 => {
-                self.status = format!(
-                    "Connecte. Ping OK: {}/{} reponses.",
-                    summary.received, summary.transmitted
-                );
+        match ping_once(wifi.sta_netif().get_index()) {
+            Ok(true) => {
+                self.status = format!("Connecte. Ping de {} reussi.", PING_TARGET);
             }
-            Ok(summary) => {
-                self.status = format!(
-                    "Wi-Fi connecte, ping sans reponse ({}/{}).",
-                    summary.received, summary.transmitted
-                );
+            Ok(false) => {
+                self.status = format!("Wi-Fi connecte, aucune reponse de {PING_TARGET}.");
             }
             Err(error) => {
                 log::error!("Ping to {PING_TARGET} failed: {error}");
                 self.status = format!("Wi-Fi connecte, erreur ping: {error}");
             }
         }
+    }
+}
+
+fn ping_once(interface: u32) -> io::Result<bool> {
+    let target_addr = ip_addr_t {
+        u_addr: ip_addr__bindgen_ty_1 {
+            ip4: ip4_addr_t {
+                addr: u32::from_be_bytes(PING_TARGET.octets()),
+            },
+        },
+        type_: lwip_ip_addr_type_IPADDR_TYPE_V4 as u8,
+    };
+    let config = esp_ping_config_t {
+        count: 1,
+        interval_ms: 1000,
+        timeout_ms: 1000,
+        data_size: 56,
+        tos: 0,
+        ttl: 64,
+        target_addr,
+        task_stack_size: PING_TASK_STACK_SIZE,
+        task_prio: 2,
+        interface,
+    };
+    let completed = AtomicBool::new(false);
+    let callbacks = esp_ping_callbacks_t {
+        cb_args: &completed as *const AtomicBool as *mut std::ffi::c_void,
+        on_ping_success: None,
+        on_ping_timeout: None,
+        on_ping_end: Some(ping_finished),
+    };
+    let mut handle: esp_ping_handle_t = std::ptr::null_mut();
+
+    let result = unsafe { esp_ping_new_session(&config, &callbacks, &mut handle) };
+    check_ping_result(result)?;
+    if handle.is_null() {
+        return Err(io::Error::other("ESP-IDF returned an empty ping session"));
+    }
+
+    let start_result = unsafe { esp_ping_start(handle) };
+    if start_result != ESP_OK {
+        let delete_result = unsafe { esp_ping_delete_session(handle) };
+        if delete_result != ESP_OK {
+            log::error!("Could not delete failed ping session: {delete_result}");
+        }
+        return Err(io::Error::from_raw_os_error(start_result));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !completed.load(Ordering::Acquire) && Instant::now() < deadline {
+        sleep(Duration::from_millis(20));
+    }
+
+    if !completed.load(Ordering::Acquire) {
+        let stop_result = unsafe { esp_ping_stop(handle) };
+        if stop_result != ESP_OK {
+            log::error!("Could not stop timed-out ping session: {stop_result}");
+        }
+        let delete_result = unsafe { esp_ping_delete_session(handle) };
+        if delete_result != ESP_OK {
+            log::error!("Could not delete timed-out ping session: {delete_result}");
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "ESP-IDF ping session did not finish",
+        ));
+    }
+
+    let mut replies = 0u32;
+    let mut requests = 0u32;
+    let reply_result = unsafe {
+        esp_ping_get_profile(
+            handle,
+            esp_ping_profile_t_ESP_PING_PROF_REPLY,
+            &mut replies as *mut u32 as *mut std::ffi::c_void,
+            std::mem::size_of_val(&replies) as u32,
+        )
+    };
+    let request_result = unsafe {
+        esp_ping_get_profile(
+            handle,
+            esp_ping_profile_t_ESP_PING_PROF_REQUEST,
+            &mut requests as *mut u32 as *mut std::ffi::c_void,
+            std::mem::size_of_val(&requests) as u32,
+        )
+    };
+    let stop_result = unsafe { esp_ping_stop(handle) };
+    let delete_result = unsafe { esp_ping_delete_session(handle) };
+
+    check_ping_result(reply_result)?;
+    check_ping_result(request_result)?;
+    check_ping_result(stop_result)?;
+    check_ping_result(delete_result)?;
+
+    Ok(replies > 0 && requests > 0)
+}
+
+unsafe extern "C" fn ping_finished(_handle: esp_ping_handle_t, args: *mut std::ffi::c_void) {
+    if !args.is_null() {
+        let completed = unsafe { &*(args as *const AtomicBool) };
+        completed.store(true, Ordering::Release);
+    }
+}
+
+fn check_ping_result(result: sys::esp_err_t) -> io::Result<()> {
+    if result == ESP_OK {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(result))
+    }
+}
+
+fn wifi_disconnect_status(reason: u16) -> String {
+    use esp_idf_svc::sys::{
+        wifi_err_reason_t_WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT,
+        wifi_err_reason_t_WIFI_REASON_AUTH_FAIL, wifi_err_reason_t_WIFI_REASON_HANDSHAKE_TIMEOUT,
+        wifi_err_reason_t_WIFI_REASON_NO_AP_FOUND,
+    };
+
+    if reason == wifi_err_reason_t_WIFI_REASON_AUTH_FAIL as u16 {
+        "Authentification refusee: mot de passe incorrect ou securite incompatible.".to_string()
+    } else if reason == wifi_err_reason_t_WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT as u16
+        || reason == wifi_err_reason_t_WIFI_REASON_HANDSHAKE_TIMEOUT as u16
+    {
+        "Echec de la negociation Wi-Fi: mot de passe incorrect possible.".to_string()
+    } else if reason == wifi_err_reason_t_WIFI_REASON_NO_AP_FOUND as u16 {
+        "Reseau introuvable: aucun point d'acces correspondant.".to_string()
+    } else {
+        format!("Connexion Wi-Fi interrompue (motif {reason}).")
     }
 }
 

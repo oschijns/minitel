@@ -5,14 +5,21 @@ use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{gpio::AnyIOPin, peripherals::Peripherals, uart},
     nvs::EspDefaultNvsPartition,
-    wifi::{ClientConfiguration, Configuration, EspWifi},
+    wifi::{ClientConfiguration, Configuration, EspWifi, WifiEvent},
 };
 use log::{error, info};
 use minitel::{
     prelude::*,
     stum::protocol::{Baudrate, RoutingRx, RoutingTx},
 };
-use std::{io, thread::sleep};
+use std::{
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicU16, Ordering},
+    },
+    thread::sleep,
+};
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -49,6 +56,16 @@ async fn async_main() -> std::io::Result<()> {
     let mut minitel = minitel::esp::Port::new(uart);
 
     let sysloop = EspSystemEventLoop::take().map_err(io::Error::other)?;
+    let disconnect_reason = Arc::new(AtomicU16::new(0));
+    let reason_for_callback = Arc::clone(&disconnect_reason);
+    let _wifi_events = sysloop
+        .subscribe::<WifiEvent<'_>, _>(move |event| {
+            if let WifiEvent::StaDisconnected(disconnected) = event {
+                reason_for_callback.store(disconnected.reason(), Ordering::Relaxed);
+            }
+        })
+        .map_err(io::Error::other)?;
+
     let nvs = EspDefaultNvsPartition::take().map_err(io::Error::other)?;
     let mut wifi = EspWifi::new(peripherals.modem, sysloop, Some(nvs)).map_err(io::Error::other)?;
     wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))
@@ -74,7 +91,9 @@ async fn async_main() -> std::io::Result<()> {
         .unwrap();
 
     // Run the app
-    App::default().run(&mut minitel, &mut wifi).await?;
+    App::default()
+        .run(&mut minitel, &mut wifi, &disconnect_reason)
+        .await?;
 
     minitel
         .set_routing(true, RoutingRx::Modem, RoutingTx::Keyboard)
