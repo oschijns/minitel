@@ -39,6 +39,7 @@ pub struct MinitelBackend<S: Write> {
     zone_attributes: [C1; 3],
     char_attributes_valid: bool,
     zone_attributes_valid: bool,
+    cursor_hidden: bool,
     repeat: u8,
     last_cell: Option<Cell>,
 }
@@ -54,6 +55,7 @@ impl<S: Write> MinitelBackend<S> {
             zone_attributes: [C1::NormalBg; 3],
             char_attributes_valid: false,
             zone_attributes_valid: false,
+            cursor_hidden: false,
             repeat: 0,
             last_cell: None,
         }
@@ -263,12 +265,18 @@ impl<S: Write> Backend for MinitelBackend<S> {
     }
 
     fn hide_cursor(&mut self) -> std::io::Result<()> {
-        self.send_c0(C0::Coff)?;
+        if !self.cursor_hidden {
+            self.send_c0(C0::Coff)?;
+            self.cursor_hidden = true;
+        }
         Ok(())
     }
 
     fn show_cursor(&mut self) -> std::io::Result<()> {
-        self.send_c0(C0::Con)?;
+        if self.cursor_hidden {
+            self.send_c0(C0::Con)?;
+            self.cursor_hidden = false;
+        }
         Ok(())
     }
 
@@ -342,6 +350,38 @@ pub mod border {
         horizontal_top: "▔",
         horizontal_bottom: "▁",
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MinitelBackend;
+    use ratatui::{Terminal, widgets::Paragraph};
+    use std::io::Cursor;
+
+    #[test]
+    fn terminal_draw_skips_unchanged_frames_and_emits_changed_frames() {
+        let backend = MinitelBackend::new(Cursor::new(Vec::new()));
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.backend_mut().stream.get_mut().clear();
+
+        let initial_text = "abcdefghijklmnopqrst";
+        let changed_text = "abcdefghijklmnopqrsx";
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(initial_text), frame.area()))
+            .unwrap();
+        terminal.backend_mut().stream.get_mut().clear();
+
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(initial_text), frame.area()))
+            .unwrap();
+        assert!(terminal.backend().stream.get_ref().is_empty());
+
+        terminal.backend_mut().stream.get_mut().clear();
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(changed_text), frame.area()))
+            .unwrap();
+        assert!(!terminal.backend().stream.get_ref().is_empty());
+    }
 }
 
 pub trait StyledMinitelExt {

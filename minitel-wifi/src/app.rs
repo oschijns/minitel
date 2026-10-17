@@ -331,26 +331,31 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let sections = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(3),
-        ])
-        .split(area);
+        let section = |offset: u16, height: u16| {
+            Rect::new(
+                area.x,
+                area.y.saturating_add(offset),
+                area.width,
+                area.height.saturating_sub(offset).min(height),
+            )
+        };
+        let title_area = section(0, 1);
+        let networks_title_area = section(1, 1);
+        let networks_area = section(2, 14);
+        let password_area = section(16, 2);
+        let picker_area = section(18, 2);
+        let status_area = section(20, 2);
+        let instructions_area = section(22, 3);
 
         Paragraph::new(" Configuration Wi-Fi ")
             .style((Color::Yellow, Color::Black))
             .alignment(Alignment::Center)
-            .render(sections[0], buf);
+            .render(title_area, buf);
         Paragraph::new("Reseaux disponibles (Suite/Retour)")
             .style((Color::White, Color::Blue))
-            .render(sections[1], buf);
+            .render(networks_title_area, buf);
 
-        let list_height = sections[2].height as usize;
+        let list_height = networks_area.height as usize;
         let first_visible = self
             .selected_network
             .saturating_sub(list_height.saturating_sub(1));
@@ -380,7 +385,7 @@ impl Widget for &App {
                 })
                 .collect()
         };
-        Paragraph::new(network_lines).render(sections[2], buf);
+        Paragraph::new(network_lines).render(networks_area, buf);
 
         let password_mask = "*".repeat(self.password.chars().count());
         let password_text = if self.password_visible {
@@ -390,7 +395,7 @@ impl Widget for &App {
         };
         Paragraph::new(vec![Line::from("Mot de passe:"), Line::from(password_text)])
             .style((Color::White, Color::Blue))
-            .render(sections[3], buf);
+            .render(password_area, buf);
 
         let picker_lines = if self.ascii_picker {
             vec![
@@ -405,12 +410,12 @@ impl Widget for &App {
         };
         Paragraph::new(picker_lines)
             .style((Color::Cyan, Color::Blue))
-            .render(sections[4], buf);
+            .render(picker_area, buf);
 
         Paragraph::new(self.status.as_str())
             .style((Color::Yellow, Color::Blue))
             .wrap(ratatui::widgets::Wrap { trim: true })
-            .render(sections[5], buf);
+            .render(status_area, buf);
         let instructions = if self.ascii_picker {
             vec![
                 Line::from("Envoi: ajouter  Suite/Retour: code"),
@@ -426,7 +431,7 @@ impl Widget for &App {
         };
         Paragraph::new(instructions)
             .style((Color::White, Color::Blue))
-            .render(sections[6], buf);
+            .render(instructions_area, buf);
     }
 }
 
