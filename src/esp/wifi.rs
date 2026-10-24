@@ -1,5 +1,10 @@
 //! Wi-Fi setup and connectivity check for the Minitel.
 
+use crate::{
+    prelude::*,
+    ratatui::MinitelBackend,
+    stum::videotex::{C0, FunctionKey, StringMessage, UserInput},
+};
 use esp_idf_svc::{
     ipv4::Ipv4Addr,
     sys::{
@@ -10,11 +15,6 @@ use esp_idf_svc::{
         lwip_ip_addr_type_IPADDR_TYPE_V4,
     },
     wifi::{AccessPointInfo, AuthMethod, ClientConfiguration, Configuration, EspWifi},
-};
-use crate::{
-    prelude::*,
-    ratatui::MinitelBackend,
-    stum::videotex::{C0, FunctionKey, StringMessage, UserInput},
 };
 use ratatui::{
     prelude::*,
@@ -83,6 +83,7 @@ enum PageAction {
     Exit,
     Rescan,
     SelectNetwork(AccessPointInfo),
+    BackToNetworks,
     BackToPassword,
     Connect,
     ShowNetworks,
@@ -118,11 +119,12 @@ impl PasswordPage {
                 self.step_ascii_code(1);
                 PageAction::None
             }
+            UserInput::FunctionKey(FunctionKey::Suite) => PageAction::Connect,
             UserInput::FunctionKey(FunctionKey::Retour) if self.ascii_picker => {
                 self.step_ascii_code(-1);
                 PageAction::None
             }
-            UserInput::FunctionKey(FunctionKey::Retour) => PageAction::None,
+            UserInput::FunctionKey(FunctionKey::Retour) => PageAction::BackToNetworks,
             UserInput::FunctionKey(FunctionKey::Guide) => {
                 self.ascii_picker = !self.ascii_picker;
                 self.ascii_digits.clear();
@@ -248,7 +250,9 @@ impl ResultPage {
         match input {
             UserInput::FunctionKey(FunctionKey::Sommaire) => PageAction::Exit,
             UserInput::FunctionKey(FunctionKey::Retour) => PageAction::BackToPassword,
-            UserInput::FunctionKey(FunctionKey::Envoi) => PageAction::ShowNetworks,
+            UserInput::FunctionKey(FunctionKey::Suite | FunctionKey::Envoi) => {
+                PageAction::ShowNetworks
+            }
             _ => PageAction::None,
         }
     }
@@ -346,6 +350,13 @@ impl WifiForm {
                         return Ok(());
                     };
                     self.page = Page::Password(PasswordPage::new(network, networks_page));
+                }
+                PageAction::BackToNetworks => {
+                    if let Page::Password(password_page) =
+                        std::mem::replace(&mut self.page, Page::Networks(NetworksPage::default()))
+                    {
+                        self.page = Page::Networks(password_page.networks_page);
+                    };
                 }
                 PageAction::BackToPassword => {
                     if let Page::Result(result) =
@@ -660,6 +671,11 @@ impl Page {
     }
 }
 
+const NETWORKS_PAGE_FOOTER: &str = concat![
+    "Retour/Suite: choisir     Envoi: valider\n",
+    "Fin: rescanner         Sommaire: quitter"
+];
+
 impl NetworksPage {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let (content, footer) = Page::draw_frame(area, buf);
@@ -705,14 +721,22 @@ impl NetworksPage {
             .style((Color::Yellow, Color::Blue))
             .wrap(ratatui::widgets::Wrap { trim: true })
             .render(Page::status_area(area), buf);
-        Paragraph::new(vec![
-            Line::from("Suite/Retour: choisir  Envoi: suite"),
-            Line::from("Fin: rescanner  Sommaire: quitter"),
-        ])
-        .style((Color::White, Color::Blue))
-        .render(footer, buf);
+        Paragraph::new(NETWORKS_PAGE_FOOTER)
+            .style((Color::White, Color::Blue))
+            .render(footer, buf);
     }
 }
+
+const PASSWORD_PAGE_FOOTER: &str = concat![
+    "Retour: reseaux   Suite/Envoi: connecter\n",
+    "Correction: effacer    Annulation: vider\n",
+    "Guide: ASCII        Repetition: afficher"
+];
+const PASSWORD_PAGE_ASCII_PICKER: &str = concat![
+    "Suite/Retour: caractere   Envoi: ajouter\n",
+    "Correction: effacer code   Guide: fermer\n",
+    "Sommaire: quitter"
+];
 
 impl PasswordPage {
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -747,17 +771,9 @@ impl PasswordPage {
                 .render(Page::status_area(area), buf);
         }
         let instructions = if self.ascii_picker {
-            vec![
-                Line::from("Envoi: ajouter  Guide: fermer"),
-                Line::from("Correction: effacer  Retour: reseau"),
-                Line::from("Sommaire: quitter"),
-            ]
+            PASSWORD_PAGE_ASCII_PICKER
         } else {
-            vec![
-                Line::from("Envoi: connecter  Retour: reseau"),
-                Line::from("Correction: effacer  Annulation: vider"),
-                Line::from("Guide: ASCII  Repetition: afficher"),
-            ]
+            PASSWORD_PAGE_FOOTER
         };
         Paragraph::new(instructions)
             .style((Color::White, Color::Blue))
@@ -773,11 +789,16 @@ impl ConnectingPage {
             .alignment(Alignment::Center)
             .wrap(ratatui::widgets::Wrap { trim: true })
             .render(content, buf);
-        Paragraph::new(vec![Line::from("Connexion en cours...")])
+        Paragraph::new("Connexion en cours...")
             .style((Color::White, Color::Blue))
             .render(footer, buf);
     }
 }
+
+const RESULT_PAGE_FOOTER: &str = concat![
+    "Retour: mot de passe  Suite: reseaux\n",
+    "Envoi: reseaux     Sommaire: quitter"
+];
 
 impl ResultPage {
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -787,12 +808,9 @@ impl ResultPage {
             .alignment(Alignment::Center)
             .wrap(ratatui::widgets::Wrap { trim: true })
             .render(content, buf);
-        Paragraph::new(vec![
-            Line::from("Retour: mot de passe  Envoi: reseaux"),
-            Line::from("Sommaire: quitter"),
-        ])
-        .style((Color::White, Color::Blue))
-        .render(footer, buf);
+        Paragraph::new(RESULT_PAGE_FOOTER)
+            .style((Color::White, Color::Blue))
+            .render(footer, buf);
     }
 }
 
@@ -835,6 +853,34 @@ mod tests {
     fn password_visibility_escapes_characters_not_displayable_on_minitel() {
         assert_eq!(visible_password("abc~"), "abc\\x7E");
         assert_eq!(visible_password("A"), "A");
+    }
+
+    #[test]
+    fn network_list_uses_up_and_down_arrows_for_selection() {
+        let mut page = NetworksPage {
+            networks: vec![test_network(), test_network()],
+            ..Default::default()
+        };
+
+        page.handle_input(UserInput::C0(C0::LF));
+        assert_eq!(page.selected_network, 1);
+
+        page.handle_input(UserInput::C0(C0::VT));
+        assert_eq!(page.selected_network, 0);
+    }
+
+    #[test]
+    fn suite_selects_the_current_network() {
+        let network = test_network();
+        let mut page = NetworksPage {
+            networks: vec![network.clone()],
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            page.handle_input(UserInput::FunctionKey(FunctionKey::Suite)),
+            PageAction::SelectNetwork(selected) if selected == network
+        ));
     }
 
     fn test_network() -> AccessPointInfo {
