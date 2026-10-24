@@ -35,6 +35,7 @@ const PING_TASK_STACK_SIZE: u32 = 8192;
 
 #[derive(Debug)]
 pub struct App {
+    page: Page,
     networks: Vec<AccessPointInfo>,
     selected_network: usize,
     password: String,
@@ -46,9 +47,18 @@ pub struct App {
     exit: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Networks,
+    Password,
+    Connecting,
+    Result,
+}
+
 impl Default for App {
     fn default() -> Self {
         Self {
+            page: Page::Networks,
             networks: Vec::new(),
             selected_network: 0,
             password: String::new(),
@@ -103,7 +113,11 @@ impl App {
             minitel.write(buffer).await?;
             buffer.clear();
             cursor.set_position(0);
-            self.handle_events(minitel, wifi, disconnect_reason).await?;
+            if self.page == Page::Connecting {
+                self.connect_and_ping(wifi, disconnect_reason);
+            } else {
+                self.handle_events(minitel, wifi).await?;
+            }
         }
         Ok(())
     }
@@ -116,22 +130,23 @@ impl App {
         &mut self,
         minitel: &mut B,
         wifi: &mut EspWifi<'_>,
-        disconnect_reason: &AtomicU16,
     ) -> io::Result<()> {
         if let Ok(input) = minitel.read_s0_stroke().await {
             match input {
                 UserInput::FunctionKey(FunctionKey::Sommaire) => self.exit = true,
                 UserInput::FunctionKey(FunctionKey::Suite) => {
-                    if self.ascii_picker {
+                    if self.page == Page::Password && self.ascii_picker {
                         self.step_ascii_code(1);
-                    } else if !self.networks.is_empty() {
+                    } else if self.page == Page::Networks && !self.networks.is_empty() {
                         self.selected_network = (self.selected_network + 1) % self.networks.len();
                     }
                 }
                 UserInput::FunctionKey(FunctionKey::Retour) => {
-                    if self.ascii_picker {
+                    if self.page == Page::Password && self.ascii_picker {
                         self.step_ascii_code(-1);
-                    } else if !self.networks.is_empty() {
+                    } else if self.page == Page::Password || self.page == Page::Result {
+                        self.page = Page::Password;
+                    } else if self.page == Page::Networks && !self.networks.is_empty() {
                         self.selected_network = self
                             .selected_network
                             .checked_sub(1)
@@ -139,34 +154,56 @@ impl App {
                     }
                 }
                 UserInput::FunctionKey(FunctionKey::Guide) => {
-                    self.ascii_picker = !self.ascii_picker;
-                    self.ascii_digits.clear();
-                }
-                UserInput::FunctionKey(FunctionKey::Envoi) => {
-                    if self.ascii_picker {
-                        self.insert_ascii_character();
-                    } else {
-                        self.connect_and_ping(wifi, disconnect_reason);
+                    if self.page == Page::Password {
+                        self.ascii_picker = !self.ascii_picker;
+                        self.ascii_digits.clear();
                     }
                 }
+                UserInput::FunctionKey(FunctionKey::Envoi) => match self.page {
+                    Page::Networks => {
+                        if self.networks.get(self.selected_network).is_some() {
+                            self.page = Page::Password;
+                            self.status.clear();
+                        }
+                    }
+                    Page::Password if self.ascii_picker => self.insert_ascii_character(),
+                    Page::Password => {
+                        self.status = "Connexion en cours...".to_string();
+                        self.page = Page::Connecting;
+                    }
+                    Page::Result => {
+                        self.page = Page::Networks;
+                        self.status.clear();
+                    }
+                    Page::Connecting => {}
+                },
                 UserInput::FunctionKey(FunctionKey::Correction) => {
-                    if self.ascii_picker && !self.ascii_digits.is_empty() {
+                    if self.page == Page::Password
+                        && self.ascii_picker
+                        && !self.ascii_digits.is_empty()
+                    {
                         self.ascii_digits.pop();
-                    } else {
+                    } else if self.page == Page::Password {
                         self.password.pop();
                     }
                 }
                 UserInput::FunctionKey(FunctionKey::Repetition) => {
-                    self.password_visible = !self.password_visible;
+                    if self.page == Page::Password {
+                        self.password_visible = !self.password_visible;
+                    }
                 }
                 UserInput::FunctionKey(FunctionKey::Annulation) => {
-                    self.password.clear();
+                    if self.page == Page::Password {
+                        self.password.clear();
+                    }
                 }
                 UserInput::FunctionKey(FunctionKey::ConnexionFin) => {
-                    self.scan_networks(wifi);
+                    if self.page == Page::Networks {
+                        self.scan_networks(wifi);
+                    }
                 }
                 UserInput::Char(character) if self.ascii_picker && character.is_ascii_digit() => {
-                    if self.ascii_digits.len() < 3 {
+                    if self.page == Page::Password && self.ascii_digits.len() < 3 {
                         self.ascii_digits.push(character);
                         if let Ok(code) = self.ascii_digits.parse::<u8>() {
                             if (FIRST_PRINTABLE_ASCII..=LAST_PRINTABLE_ASCII).contains(&code) {
@@ -176,7 +213,8 @@ impl App {
                     }
                 }
                 UserInput::Char(character)
-                    if !self.ascii_picker
+                    if self.page == Page::Password
+                        && !self.ascii_picker
                         && !character.is_control()
                         && self.password.len() + character.len_utf8() <= 63 =>
                 {
@@ -189,6 +227,7 @@ impl App {
     }
 
     fn scan_networks(&mut self, wifi: &mut EspWifi<'_>) {
+        self.page = Page::Networks;
         self.status = "Recherche des reseaux Wi-Fi...".to_string();
         match wifi.scan() {
             Ok(networks) => {
@@ -252,16 +291,19 @@ impl App {
     }
 
     fn connect_and_ping(&mut self, wifi: &mut EspWifi<'_>, disconnect_reason: &AtomicU16) {
+        self.status = self.connection_result(wifi, disconnect_reason);
+        self.page = Page::Result;
+    }
+
+    fn connection_result(&self, wifi: &mut EspWifi<'_>, disconnect_reason: &AtomicU16) -> String {
         let Some(network) = self.networks.get(self.selected_network).cloned() else {
-            self.status = "Aucun reseau selectionne. Guide pour rescanner.".to_string();
-            return;
+            return "Aucun reseau selectionne.".to_string();
         };
 
         let password = match self.password.as_str().try_into() {
             Ok(password) => password,
             Err(_) => {
-                self.status = "Mot de passe trop long (63 octets maximum).".to_string();
-                return;
+                return "Mot de passe trop long (63 octets maximum).".to_string();
             }
         };
         let config = Configuration::Client(ClientConfiguration {
@@ -273,15 +315,13 @@ impl App {
             ..Default::default()
         });
 
-        self.status = format!("Connexion a {}...", network.ssid);
         disconnect_reason.store(0, Ordering::Relaxed);
         if let Err(error) = wifi
             .set_configuration(&config)
             .and_then(|()| wifi.connect())
         {
             log::error!("Wi-Fi connection could not be started: {error}");
-            self.status = format!("Impossible de lancer la connexion: {error}");
-            return;
+            return format!("Impossible de lancer la connexion: {error}");
         }
 
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -292,33 +332,29 @@ impl App {
                     Ok(false) => {
                         let reason = disconnect_reason.load(Ordering::Relaxed);
                         if reason != 0 {
-                            self.status = wifi_disconnect_status(reason);
-                            return;
+                            return wifi_disconnect_status(reason);
                         }
                     }
                     Err(error) => {
                         log::error!("Could not check Wi-Fi network interface: {error}");
-                        self.status = format!("Erreur reseau: {error}");
-                        return;
+                        return format!("Erreur reseau: {error}");
                     }
                 },
                 Ok(false) => {
                     let reason = disconnect_reason.load(Ordering::Relaxed);
                     if reason != 0 {
-                        self.status = wifi_disconnect_status(reason);
-                        return;
+                        return wifi_disconnect_status(reason);
                     }
                 }
                 Err(error) => {
                     log::error!("Could not check Wi-Fi connection: {error}");
-                    self.status = format!("Erreur Wi-Fi: {error}");
-                    return;
+                    return format!("Erreur Wi-Fi: {error}");
                 }
             }
 
             if Instant::now() >= deadline {
                 let reason = disconnect_reason.load(Ordering::Relaxed);
-                self.status = if reason != 0 {
+                return if reason != 0 {
                     wifi_disconnect_status(reason)
                 } else {
                     format!(
@@ -326,22 +362,20 @@ impl App {
                         network.ssid
                     )
                 };
-                return;
             }
             sleep(Duration::from_millis(200));
         }
 
-        self.status = format!("Connecte. Ping de {PING_TARGET}...");
         match ping_once(wifi.sta_netif().get_index()) {
             Ok(true) => {
-                self.status = format!("Connecte. Ping de {} reussi.", PING_TARGET);
+                format!("Connexion reussie. Ping de {} reussi.", PING_TARGET)
             }
             Ok(false) => {
-                self.status = format!("Wi-Fi connecte, aucune reponse de {PING_TARGET}.");
+                format!("Wi-Fi connecte, aucune reponse de {PING_TARGET}.")
             }
             Err(error) => {
                 log::error!("Ping to {PING_TARGET} failed: {error}");
-                self.status = format!("Wi-Fi connecte, erreur ping: {error}");
+                format!("Wi-Fi connecte, erreur ping: {error}")
             }
         }
     }
@@ -478,107 +512,170 @@ fn wifi_disconnect_status(reason: u16) -> String {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let section = |offset: u16, height: u16| {
-            Rect::new(
-                area.x,
-                area.y.saturating_add(offset),
-                area.width,
-                area.height.saturating_sub(offset).min(height),
-            )
-        };
-        let title_area = section(0, 1);
-        let networks_title_area = section(1, 1);
-        let networks_area = section(2, 14);
-        let password_area = section(16, 2);
-        let picker_area = section(18, 2);
-        let status_area = section(20, 2);
-        let instructions_area = section(22, 3);
-
+        let title = Rect::new(area.x, area.y, area.width, 1.min(area.height));
         Paragraph::new(" Configuration Wi-Fi ")
             .style((Color::Yellow, Color::Black))
             .alignment(Alignment::Center)
-            .render(title_area, buf);
-        Paragraph::new("Reseaux disponibles (Suite/Retour)")
-            .style((Color::White, Color::Blue))
-            .render(networks_title_area, buf);
+            .render(title, buf);
 
-        let list_height = networks_area.height as usize;
-        let first_visible = self
-            .selected_network
-            .saturating_sub(list_height.saturating_sub(1));
-        let network_lines = if self.networks.is_empty() {
-            vec![Line::from("Aucun reseau disponible")]
-        } else {
-            self.networks
-                .iter()
-                .enumerate()
-                .skip(first_visible)
-                .take(list_height)
-                .map(|(index, network)| {
-                    let marker = if index == self.selected_network {
-                        ">"
+        let content_y = area.y.saturating_add(2);
+        let content_height = area.height.saturating_sub(7);
+        let content = Rect::new(area.x, content_y, area.width, content_height);
+        let footer_y = area.y.saturating_add(area.height.saturating_sub(3));
+        let footer = Rect::new(area.x, footer_y, area.width, area.height.min(3));
+
+        match self.page {
+            Page::Networks => {
+                Paragraph::new("Choisissez un reseau")
+                    .style((Color::White, Color::Blue))
+                    .render(
+                        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+                        buf,
+                    );
+
+                let list_height = content.height as usize;
+                let first_visible = self
+                    .selected_network
+                    .saturating_sub(list_height.saturating_sub(1));
+                let network_lines = if self.networks.is_empty() {
+                    vec![Line::from("Aucun reseau disponible")]
+                } else {
+                    self.networks
+                        .iter()
+                        .enumerate()
+                        .skip(first_visible)
+                        .take(list_height)
+                        .map(|(index, network)| {
+                            let marker = if index == self.selected_network {
+                                ">"
+                            } else {
+                                " "
+                            };
+                            let line = Line::from(format!(
+                                "{marker} {:<28} {:>3} dBm",
+                                network.ssid, network.signal_strength
+                            ));
+                            if index == self.selected_network {
+                                line.style((Color::Black, Color::Yellow))
+                            } else {
+                                line
+                            }
+                        })
+                        .collect()
+                };
+                Paragraph::new(network_lines).render(content, buf);
+                Paragraph::new(self.status.as_str())
+                    .style((Color::Yellow, Color::Blue))
+                    .wrap(ratatui::widgets::Wrap { trim: true })
+                    .render(
+                        Rect::new(
+                            area.x,
+                            area.y.saturating_add(area.height.saturating_sub(5)),
+                            area.width,
+                            2.min(area.height.saturating_sub(3)),
+                        ),
+                        buf,
+                    );
+                Paragraph::new(vec![
+                    Line::from("Suite/Retour: choisir  Envoi: suite"),
+                    Line::from("Fin: rescanner  Sommaire: quitter"),
+                ])
+                .style((Color::White, Color::Blue))
+                .render(footer, buf);
+            }
+            Page::Password => {
+                let network_name = self
+                    .networks
+                    .get(self.selected_network)
+                    .map(|network| network.ssid.as_str())
+                    .unwrap_or("");
+                Paragraph::new(vec![
+                    Line::from("Reseau selectionne:"),
+                    Line::from(network_name).style((Color::Yellow, Color::Blue)),
+                    Line::from("Mot de passe:"),
+                    Line::from(if self.password_visible {
+                        visible_password(&self.password)
                     } else {
-                        " "
-                    };
-                    let line = Line::from(format!(
-                        "{marker} {:<24} {:>3} dBm",
-                        network.ssid, network.signal_strength
-                    ));
-                    if index == self.selected_network {
-                        line.style((Color::Black, Color::Yellow))
-                    } else {
-                        line
-                    }
-                })
-                .collect()
-        };
-        Paragraph::new(network_lines).render(networks_area, buf);
+                        "*".repeat(self.password.chars().count())
+                    }),
+                ])
+                .style((Color::White, Color::Blue))
+                .render(content, buf);
 
-        let password_mask = "*".repeat(self.password.chars().count());
-        let password_text = if self.password_visible {
-            visible_password(&self.password)
-        } else {
-            password_mask
-        };
-        Paragraph::new(vec![Line::from("Mot de passe:"), Line::from(password_text)])
-            .style((Color::White, Color::Blue))
-            .render(password_area, buf);
+                if self.ascii_picker {
+                    Paragraph::new(vec![
+                        Line::from(format!("ASCII {}  Suite/Retour: +/-", self.ascii_code)),
+                        Line::from(format!(
+                            "Code: {} (32-126), Envoi: ajouter",
+                            self.ascii_digits
+                        )),
+                    ])
+                    .style((Color::Cyan, Color::Blue))
+                    .render(
+                        Rect::new(
+                            area.x,
+                            area.y.saturating_add(area.height.saturating_sub(5)),
+                            area.width,
+                            2.min(area.height.saturating_sub(3)),
+                        ),
+                        buf,
+                    );
+                } else if !self.status.is_empty() {
+                    Paragraph::new(self.status.as_str())
+                        .style((Color::Yellow, Color::Blue))
+                        .wrap(ratatui::widgets::Wrap { trim: true })
+                        .render(
+                            Rect::new(
+                                area.x,
+                                area.y.saturating_add(area.height.saturating_sub(5)),
+                                area.width,
+                                2.min(area.height.saturating_sub(3)),
+                            ),
+                            buf,
+                        );
+                }
+                let instructions = if self.ascii_picker {
+                    vec![
+                        Line::from("Envoi: ajouter  Guide: fermer"),
+                        Line::from("Correction: effacer  Retour: reseau"),
+                        Line::from("Sommaire: quitter"),
+                    ]
+                } else {
+                    vec![
+                        Line::from("Envoi: connecter  Retour: reseau"),
+                        Line::from("Correction: effacer  Annulation: vider"),
+                        Line::from("Guide: ASCII  Repetition: afficher"),
+                    ]
+                };
+                Paragraph::new(instructions)
+                    .style((Color::White, Color::Blue))
+                    .render(footer, buf);
+            }
+            Page::Connecting | Page::Result => {
+                let message = if self.page == Page::Connecting {
+                    "Connexion au reseau...\nVeuillez patienter."
+                } else {
+                    self.status.as_str()
+                };
+                Paragraph::new(message)
+                    .style((Color::Yellow, Color::Blue))
+                    .alignment(Alignment::Center)
+                    .wrap(ratatui::widgets::Wrap { trim: true })
+                    .render(content, buf);
 
-        let picker_lines = if self.ascii_picker {
-            vec![
-                Line::from(format!("ASCII {} Suite/Retour +/-", self.ascii_code)),
-                Line::from(format!("Code: {} (32-126), Envoi +", self.ascii_digits)),
-            ]
-        } else {
-            vec![
-                Line::from("Guide: saisie ASCII (32-126)"),
-                Line::from("Repetition: afficher/masquer"),
-            ]
-        };
-        Paragraph::new(picker_lines)
-            .style((Color::Cyan, Color::Blue))
-            .render(picker_area, buf);
-
-        Paragraph::new(self.status.as_str())
-            .style((Color::Yellow, Color::Blue))
-            .wrap(ratatui::widgets::Wrap { trim: true })
-            .render(status_area, buf);
-        let instructions = if self.ascii_picker {
-            vec![
-                Line::from("Envoi: ajouter  Suite/Retour: code"),
-                Line::from("Correction: retour  Guide: fermer"),
-                Line::from("Fin: rescanner  Sommaire: quitter"),
-            ]
-        } else {
-            vec![
-                Line::from("Envoi: connecter  Suite/Retour: reseaux"),
-                Line::from("Correction: retour  Annulation: vider"),
-                Line::from("Fin: rescanner  Sommaire: quitter"),
-            ]
-        };
-        Paragraph::new(instructions)
-            .style((Color::White, Color::Blue))
-            .render(instructions_area, buf);
+                let instructions = if self.page == Page::Connecting {
+                    vec![Line::from("Connexion en cours...")]
+                } else {
+                    vec![
+                        Line::from("Retour: mot de passe  Envoi: reseaux"),
+                        Line::from("Sommaire: quitter"),
+                    ]
+                };
+                Paragraph::new(instructions)
+                    .style((Color::White, Color::Blue))
+                    .render(footer, buf);
+            }
+        }
     }
 }
 
