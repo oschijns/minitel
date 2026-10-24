@@ -22,6 +22,11 @@ members = [
 ratatui = { version = "0.30", optional = true, default-features = false, features = [] }
 axum = { version = "0.8", optional = true, default-features = false, features = ["ws"] }
 esp-idf-hal = { version = "0.47", optional = true }
+esp-idf-svc = { version = "0.53", optional = true, features = [
+    "critical-section",
+    "embassy-time-driver",
+    "embassy-sync",
+] }
 num_enum = "0.7"
 smallvec = "1.16"
 unicode-normalization = "0.1"
@@ -32,6 +37,7 @@ futures = { version = "0.3", optional = true }
 [features]
 default = []
 esp     = ["dep:esp-idf-hal"]
+esp-wifi = ["esp", "ratatui", "dep:esp-idf-svc"]
 espdoc  = []
 ratatui = ["dep:ratatui"]
 docsrs  = ["ratatui", "axum", "espdoc", "futures"]

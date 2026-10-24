@@ -1,6 +1,3 @@
-mod app;
-
-use crate::app::App;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{gpio::AnyIOPin, peripherals::Peripherals, uart},
@@ -11,6 +8,7 @@ use log::{error, info};
 use minitel::{
     prelude::*,
     stum::protocol::{Baudrate, RoutingRx, RoutingTx},
+    esp::wifi::WifiForm,
 };
 use std::{
     io,
@@ -91,9 +89,7 @@ async fn async_main() -> std::io::Result<()> {
         .unwrap();
 
     // Run the app
-    App::default()
-        .run(&mut minitel, &mut wifi, &disconnect_reason)
-        .await?;
+    WifiForm::default().run(&mut minitel, &mut wifi, &disconnect_reason).await?;
 
     minitel
         .set_routing(true, RoutingRx::Modem, RoutingTx::Keyboard)

@@ -1,6 +1,10 @@
 #[doc(inline)]
 pub use esp::*;
 
+/// Form for setting up wifi connections
+#[cfg(feature = "esp-wifi")]
+pub mod wifi;
+
 #[cfg(feature = "esp")]
 mod esp {
     use crate::{AsyncMinitelBaudrateControl, AsyncMinitelRead, AsyncMinitelWrite};

@@ -22,7 +22,7 @@ ratatui = { version = "0.30", default-features = false, features = [
     "widget-calendar",
 ] }
 strum = { version = "0.28", features = ["derive"] }
-minitel = { path = "..", features = ["esp", "ratatui"] }
+minitel = { path = "..", features = ["esp", "esp-wifi", "ratatui"] }
 esp-idf-svc = { version = "0.53", features = [
     "critical-section",
     "embassy-time-driver",
