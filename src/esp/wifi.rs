@@ -75,6 +75,7 @@ struct ConnectingPage {
 struct ResultPage {
     password_page: PasswordPage,
     status: String,
+    connected: bool,
 }
 
 #[derive(Debug)]
@@ -250,6 +251,9 @@ impl ResultPage {
         match input {
             UserInput::FunctionKey(FunctionKey::Sommaire) => PageAction::Exit,
             UserInput::FunctionKey(FunctionKey::Retour) => PageAction::BackToPassword,
+            UserInput::FunctionKey(FunctionKey::Suite | FunctionKey::Envoi) if self.connected => {
+                PageAction::Exit
+            }
             UserInput::FunctionKey(FunctionKey::Suite | FunctionKey::Envoi) => {
                 PageAction::ShowNetworks
             }
@@ -306,6 +310,8 @@ impl WifiForm {
                     wifi,
                     disconnect_reason,
                 );
+                let connected = wifi.is_connected().map_err(io::Error::other)?
+                    && wifi.sta_netif().is_up().map_err(io::Error::other)?;
                 let Page::Connecting(connecting) =
                     std::mem::replace(&mut self.page, Page::Networks(NetworksPage::default()))
                 else {
@@ -314,6 +320,7 @@ impl WifiForm {
                 self.page = Page::Result(ResultPage {
                     password_page: connecting.password_page,
                     status: result,
+                    connected,
                 });
             } else {
                 self.handle_events(minitel, wifi).await?;
@@ -880,6 +887,34 @@ mod tests {
         assert!(matches!(
             page.handle_input(UserInput::FunctionKey(FunctionKey::Suite)),
             PageAction::SelectNetwork(selected) if selected == network
+        ));
+    }
+
+    #[test]
+    fn result_page_continues_after_successful_connection() {
+        let mut page = ResultPage {
+            password_page: PasswordPage::new(test_network(), NetworksPage::default()),
+            status: "Connexion reussie.".to_string(),
+            connected: true,
+        };
+
+        assert!(matches!(
+            page.handle_input(UserInput::FunctionKey(FunctionKey::Suite)),
+            PageAction::Exit
+        ));
+    }
+
+    #[test]
+    fn result_page_allows_rescan_after_failed_connection() {
+        let mut page = ResultPage {
+            password_page: PasswordPage::new(test_network(), NetworksPage::default()),
+            status: "Connexion impossible.".to_string(),
+            connected: false,
+        };
+
+        assert!(matches!(
+            page.handle_input(UserInput::FunctionKey(FunctionKey::Suite)),
+            PageAction::ShowNetworks
         ));
     }
 

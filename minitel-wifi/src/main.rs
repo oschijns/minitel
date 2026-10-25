@@ -1,3 +1,9 @@
+// Form for writing an email
+//pub mod mail;
+
+// Form for getting a webpage
+pub mod browser;
+
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{gpio::AnyIOPin, peripherals::Peripherals, uart},
@@ -92,6 +98,12 @@ async fn async_main() -> std::io::Result<()> {
     WifiForm::default()
         .run(&mut minitel, &mut wifi, &disconnect_reason)
         .await?;
+
+    if wifi.is_connected().map_err(io::Error::other)?
+        && wifi.sta_netif().is_up().map_err(io::Error::other)?
+    {
+        browser::Browser::default().run(&mut minitel).await?;
+    }
 
     minitel
         .set_routing(true, RoutingRx::Modem, RoutingTx::Keyboard)

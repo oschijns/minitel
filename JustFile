@@ -17,7 +17,16 @@ example-axum:
 example-esp32:
     source ~/export-esp.sh && cargo +esp --config minitel-app-example/cargo-config-esp.toml run -p minitel-app-example --features=esp -- --monitor
 
+# Run the minitel WiFi app
+check-wifi:
+    source ~/export-esp.sh && cargo +esp --config minitel-wifi/cargo-config-esp.toml check -p minitel-wifi
+
 
 # Run the minitel WiFi app
 run-wifi:
     source ~/export-esp.sh && cargo +esp --config minitel-wifi/cargo-config-esp.toml run -p minitel-wifi -- --monitor
+
+
+# Host a simple server for testing the minitel sample app
+host-server:
+    python3 -m http.server 8000 --bind 0.0.0.0
